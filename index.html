@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文件變更對比工具</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/7.0.0/diff.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .box-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        label {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #34495e;
+        }
+        textarea {
+            width: 100%;
+            height: 250px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            resize: vertical;
+            font-size: 14px;
+            line-height: 1.5;
+            box-sizing: border-box;
+        }
+        .btn-container {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            font-size: 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-weight: bold;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        #boxC {
+            display: none; /* 預設隱藏，撳對比後先顯示 */
+            background-color: #fff;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            min-height: 200px;
+            font-size: 15px;
+            line-height: 1.8;
+            white-space: pre-wrap; /* 保留換行符號 */
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        
+        /* Tracked Changes 的樣式設計 */
+        .diff-added {
+            background-color: #e6ffed;
+            color: #22863a;
+            text-decoration: underline;
+            cursor: pointer;
+            padding: 2px;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+        }
+        .diff-removed {
+            background-color: #ffeef0;
+            color: #cb2431;
+            text-decoration: line-through;
+            cursor: pointer;
+            padding: 2px;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+        }
+        .diff-added:hover::after {
+            content: " (點擊接受新增)";
+            font-size: 12px;
+            color: gray;
+            text-decoration: none;
+        }
+        .diff-removed:hover::after {
+            content: " (點擊接受刪除)";
+            font-size: 12px;
+            color: gray;
+            text-decoration: none;
+        }
+        
+        #instruction {
+            font-size: 13px;
+            color: #7f8c8d;
+            margin-top: 5px;
+            display: none;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>文件變更對比工具</h1>
+
+    <div class="container">
+        <div class="box-wrapper">
+            <label for="boxA">Text Box A (Original 原文):</label>
+            <textarea id="boxA" placeholder="請在此貼上原文..."></textarea>
+        </div>
+        <div class="box-wrapper">
+            <label for="boxB">Text Box B (Revised 修改版):</label>
+            <textarea id="boxB" placeholder="請在此貼上修改後的文件..."></textarea>
+        </div>
+    </div>
+
+    <div class="btn-container">
+        <button id="compareBtn" onclick="performComparison()">比較</button>
+        <p id="instruction">提示：在下方的 Text Box C 中，<strong>點擊</strong>綠色底線文字以接受新增，<strong>點擊</strong>紅色刪除線文字以接受刪除。</p>
+    </div>
+
+    <label for="boxC" id="labelC" style="display: none;">Text Box C (對比結果 - 可點擊以 Accept Changes):</label>
+    <div id="boxC"></div>
+
+    <script>
+        function performComparison() {
+            const textA = document.getElementById('boxA').value;
+            const textB = document.getElementById('boxB').value;
+            const boxC = document.getElementById('boxC');
+            const labelC = document.getElementById('labelC');
+            const instruction = document.getElementById('instruction');
+
+            if (!textA && !textB) {
+                alert("請先輸入文字進行對比！");
+                return;
+            }
+
+            // 使用 jsdiff 進行字詞級別的對比 (diffWords)
+            const diff = Diff.diffWords(textA, textB);
+            
+            // 建立 HTML 來顯示 Tracked Changes
+            let displayHtml = '';
+            diff.forEach((part) => {
+                // 將換行符號轉換為 <br> 以便在 HTML 中正確顯示
+                let safeText = part.value.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                
+                if (part.added) {
+                    // 新增的文字 (B 有，A 冇)
+                    displayHtml += `<span class="diff-added" onclick="acceptChange(this, 'add')">${safeText}</span>`;
+                } else if (part.removed) {
+                    // 刪除的文字 (A 有，B 冇)
+                    displayHtml += `<span class="diff-removed" onclick="acceptChange(this, 'remove')">${safeText}</span>`;
+                } else {
+                    // 無變更的文字
+                    displayHtml += safeText;
+                }
+            });
+
+            boxC.innerHTML = displayHtml;
+            boxC.style.display = 'block';
+            labelC.style.display = 'block';
+            instruction.style.display = 'block';
+        }
+
+        // Accept Changes 的核心邏輯
+        function acceptChange(element, action) {
+            if (action === 'add') {
+                // 接受新增：移除 span 標籤，保留裡面的文字
+                const textNode = document.createTextNode(element.textContent);
+                element.parentNode.replaceChild(textNode, element);
+            } else if (action === 'remove') {
+                // 接受刪除：直接將整個 span 從畫面上移除
+                element.remove();
+            }
+        }
+    </script>
+</body>
+</html>
