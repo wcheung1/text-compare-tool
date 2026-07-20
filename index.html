@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>文件變更對比工具</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/7.0.0/diff.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.11.0/mammoth.browser.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -95,14 +96,52 @@
         #boxC {
             display: none; /* 預設隱藏，撳對比後先顯示 */
             background-color: #fff;
-            padding: 20px;
+            padding: 20px 20px 20px 0;
             border: 1px solid #ccc;
             border-radius: 6px;
             min-height: 200px;
             font-size: 15px;
             line-height: 1.8;
-            white-space: pre-wrap; /* 保留換行符號 */
             box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            counter-reset: line;
+        }
+
+        /* 每一行：左邊行號 + 右邊內容 */
+        .line {
+            display: flex;
+            min-height: 1.8em;
+        }
+        .line::before {
+            counter-increment: line;
+            content: counter(line);
+            flex: 0 0 3em;
+            text-align: right;
+            padding-right: 10px;
+            margin-right: 12px;
+            color: #95a5a6;
+            font-size: 12px;
+            line-height: 2.2; /* 對齊返 15px 內文 */
+            font-family: Consolas, Menlo, monospace;
+            border-right: 1px solid #e8e8e8;
+            user-select: none;
+        }
+        .line-content {
+            flex: 1;
+            min-width: 0;
+            white-space: pre-wrap; /* 保留空格同換行符號 */
+            word-break: break-word;
+        }
+
+        /* Drag & Drop 提示效果 */
+        textarea.drag-over {
+            border: 2px dashed #3498db;
+            background-color: #eaf4fc;
+        }
+
+        /* 代表被刪除/新增嘅換行符號嘅標記 */
+        .newline-marker {
+            opacity: 0.55;
+            font-size: 12px;
         }
 
         /* Tracked Changes 的樣式設計 */
@@ -183,7 +222,7 @@
                 <button type="button" class="upload-btn" onclick="document.getElementById('fileA').click()">📂 上載檔案</button>
             </div>
             <input type="file" id="fileA" style="display: none;" onchange="loadFileIntoBox(this, 'boxA', 'fileNameA')">
-            <textarea id="boxA" placeholder="請在此貼上原文，或者撳「上載檔案」揀一個純文字檔（.txt / .py / .html 等）..."></textarea>
+            <textarea id="boxA" placeholder="請在此貼上原文，或者撳「上載檔案」揀純文字檔（.txt / .py / .html 等）或 Word 檔（.doc / .docx）..."></textarea>
             <div class="file-name" id="fileNameA"></div>
         </div>
         <div class="box-wrapper">
@@ -209,30 +248,260 @@
     <div id="boxC"></div>
 
     <script>
-        /* ===== 檔案上載功能 ===== */
+        /* ===== 檔案上載功能（支援純文字檔 + .doc + .docx，撳掣或者 drag & drop 都得）===== */
         function loadFileIntoBox(inputElement, boxId, fileNameId) {
             const file = inputElement.files[0];
             if (!file) return;
+            processFile(file, boxId, fileNameId);
+            // 清空 input value，令到揀返同一個檔案都會再觸發 onchange
+            inputElement.value = '';
+        }
 
+        function processFile(file, boxId, fileNameId) {
             const reader = new FileReader();
-            reader.onload = function(e) {
-                const content = e.target.result;
-                // 簡單檢查係唔係純文字檔（binary 檔通常會有大量 null 字元）
-                if (content.indexOf('\u0000') !== -1) {
-                    alert('呢個檔案似乎唔係純文字檔（可能係 binary 檔），請揀一個用 Notepad 開得到嘅檔案。');
-                    inputElement.value = '';
+            reader.onload = async function(e) {
+                const arrayBuffer = e.target.result;
+                const bytes = new Uint8Array(arrayBuffer);
+                let text = null;
+
+                try {
+                    if (bytes.length >= 8 &&
+                        bytes[0] === 0xD0 && bytes[1] === 0xCF && bytes[2] === 0x11 && bytes[3] === 0xE0) {
+                        // Word 97-2003 (.doc)：用內置解析器抽純文字
+                        text = extractDocText(arrayBuffer);
+                    } else if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B &&
+                               /\.docx$/i.test(file.name)) {
+                        // Word 2007+ (.docx)：用 mammoth 抽純文字
+                        const result = await mammoth.extractRawText({ arrayBuffer: arrayBuffer });
+                        text = result.value;
+                    } else {
+                        // 其他：當純文字檔處理
+                        text = new TextDecoder('utf-8').decode(arrayBuffer);
+                        // 簡單檢查係唔係純文字檔（binary 檔通常會有大量 null 字元）
+                        if (text.indexOf('\u0000') !== -1) {
+                            alert('呢個檔案似乎唔係純文字檔（亦唔係 .doc / .docx），請揀一個用 Notepad 開得到嘅檔案，或者 Word 檔。');
+                            return;
+                        }
+                    }
+                } catch (err) {
+                    console.error(err);
+                    alert('解析呢個 Word 檔時發生錯誤。可以試吓用 Word 開佢，另存新檔做 .docx 再上載。');
                     return;
                 }
-                document.getElementById(boxId).value = content;
+
+                document.getElementById(boxId).value = text;
                 document.getElementById(fileNameId).textContent = '已載入：' + file.name;
             };
             reader.onerror = function() {
                 alert('讀取檔案時發生錯誤，請再試一次。');
             };
-            reader.readAsText(file, 'UTF-8');
+            reader.readAsArrayBuffer(file);
+        }
 
-            // 清空 input value，令到揀返同一個檔案都會再觸發 onchange
-            inputElement.value = '';
+        // ---- Drag & Drop：直接由檔案總管拖個檔案落 Text Box A / B ----
+        function setupDragDrop(boxId, fileNameId) {
+            const ta = document.getElementById(boxId);
+            ['dragenter', 'dragover'].forEach(evName => {
+                ta.addEventListener(evName, function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    ta.classList.add('drag-over');
+                });
+            });
+            ta.addEventListener('dragleave', function(e) {
+                e.preventDefault();
+                ta.classList.remove('drag-over');
+            });
+            ta.addEventListener('drop', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                ta.classList.remove('drag-over');
+                const file = e.dataTransfer.files && e.dataTransfer.files[0];
+                if (file) processFile(file, boxId, fileNameId);
+            });
+        }
+        setupDragDrop('boxA', 'fileNameA');
+        setupDragDrop('boxB', 'fileNameB');
+
+        /* ===== 內置 .doc (Word 97-2003) 純文字抽取器 =====
+           只用 ArrayBuffer / DataView，唔使 server，全部喺瀏覽器入面做 */
+        function extractDocText(arrayBuffer) {
+            const bytes = new Uint8Array(arrayBuffer);
+            const dv = new DataView(arrayBuffer);
+
+            // ---- 讀 CFB (Compound File) header ----
+            const sectorSize = 1 << dv.getUint16(0x1E, true);
+            const miniSectorSize = 1 << dv.getUint16(0x20, true);
+            const numFatSectors = dv.getUint32(0x2C, true);
+            const dirStart = dv.getUint32(0x30, true);
+            const miniStreamCutoff = dv.getUint32(0x38, true);
+            const miniFatStart = dv.getUint32(0x3C, true);
+            const difatStart = dv.getUint32(0x44, true);
+            const numDifatSectors = dv.getUint32(0x48, true);
+            const sectorOffset = (sid) => 512 + sid * sectorSize;
+
+            // ---- 砌 FAT ----
+            const fatSectorIds = [];
+            for (let i = 0; i < 109 && fatSectorIds.length < numFatSectors; i++) {
+                const sid = dv.getUint32(0x4C + i * 4, true);
+                if (sid !== 0xFFFFFFFF) fatSectorIds.push(sid);
+            }
+            let difatSid = difatStart;
+            for (let d = 0; d < numDifatSectors && difatSid < 0xFFFFFFFE; d++) {
+                const base = sectorOffset(difatSid);
+                const perSector = sectorSize / 4 - 1;
+                for (let i = 0; i < perSector && fatSectorIds.length < numFatSectors; i++) {
+                    const sid = dv.getUint32(base + i * 4, true);
+                    if (sid !== 0xFFFFFFFF) fatSectorIds.push(sid);
+                }
+                difatSid = dv.getUint32(base + perSector * 4, true);
+            }
+            const fat = [];
+            for (const sid of fatSectorIds) {
+                const base = sectorOffset(sid);
+                for (let i = 0; i < sectorSize / 4; i++) fat.push(dv.getUint32(base + i * 4, true));
+            }
+
+            function readChain(startSid, size) {
+                const out = new Uint8Array(size);
+                let sid = startSid, written = 0;
+                while (sid < 0xFFFFFFFE && written < size) {
+                    const take = Math.min(sectorSize, size - written);
+                    out.set(bytes.subarray(sectorOffset(sid), sectorOffset(sid) + take), written);
+                    written += take;
+                    sid = fat[sid];
+                    if (sid === undefined) break;
+                }
+                return out;
+            }
+
+            // ---- 讀 directory ----
+            let dirSize = 0, s = dirStart;
+            const seen = new Set();
+            while (s < 0xFFFFFFFE && !seen.has(s)) {
+                seen.add(s); dirSize += sectorSize; s = fat[s];
+                if (s === undefined) break;
+            }
+            const dirBytes = readChain(dirStart, dirSize);
+            const dirDv = new DataView(dirBytes.buffer);
+            const entries = {};
+            let rootEntry = null;
+            for (let off = 0; off + 128 <= dirBytes.length; off += 128) {
+                const nameLen = dirDv.getUint16(off + 0x40, true);
+                const type = dirBytes[off + 0x42];
+                if (type === 0 || nameLen < 2) continue;
+                let name = '';
+                for (let i = 0; i < nameLen / 2 - 1; i++) name += String.fromCharCode(dirDv.getUint16(off + i * 2, true));
+                const entry = { start: dirDv.getUint32(off + 0x74, true), size: dirDv.getUint32(off + 0x78, true) };
+                if (type === 5) rootEntry = entry;
+                entries[name] = entry;
+            }
+
+            // ---- Mini FAT / mini stream ----
+            let miniFat = [], miniStream = null;
+            if (rootEntry && miniFatStart < 0xFFFFFFFE) {
+                let mfSize = 0; s = miniFatStart;
+                const seen2 = new Set();
+                while (s < 0xFFFFFFFE && !seen2.has(s)) {
+                    seen2.add(s); mfSize += sectorSize; s = fat[s];
+                    if (s === undefined) break;
+                }
+                const mfBytes = readChain(miniFatStart, mfSize);
+                const mfDv = new DataView(mfBytes.buffer);
+                for (let i = 0; i < mfBytes.length / 4; i++) miniFat.push(mfDv.getUint32(i * 4, true));
+                miniStream = readChain(rootEntry.start, rootEntry.size);
+            }
+
+            function readStream(entry) {
+                if (entry.size >= miniStreamCutoff || !miniStream) return readChain(entry.start, entry.size);
+                const out = new Uint8Array(entry.size);
+                let sid = entry.start, written = 0;
+                while (sid < 0xFFFFFFFE && written < entry.size) {
+                    const take = Math.min(miniSectorSize, entry.size - written);
+                    out.set(miniStream.subarray(sid * miniSectorSize, sid * miniSectorSize + take), written);
+                    written += take;
+                    sid = miniFat[sid];
+                    if (sid === undefined) break;
+                }
+                return out;
+            }
+
+            const wordEntry = entries['WordDocument'];
+            if (!wordEntry) throw new Error('唔係有效嘅 Word 檔');
+            const wd = readStream(wordEntry);
+            const wdDv = new DataView(wd.buffer, wd.byteOffset, wd.byteLength);
+
+            // ---- FIB：搵 piece table 位置 ----
+            if (wdDv.getUint16(0, true) !== 0xA5EC) throw new Error('唔係有效嘅 Word 檔');
+            const whichTable = (wdDv.getUint16(0x000A, true) & 0x0200) ? '1Table' : '0Table';
+            const ccpText = wdDv.getUint32(0x004C, true);
+            const fcClx = wdDv.getUint32(0x01A2, true);
+            const lcbClx = wdDv.getUint32(0x01A6, true);
+
+            const tableEntry = entries[whichTable] || entries['1Table'] || entries['0Table'];
+            if (!tableEntry) throw new Error('搵唔到 table stream');
+            const table = readStream(tableEntry);
+            const tblDv = new DataView(table.buffer, table.byteOffset, table.byteLength);
+
+            // ---- 喺 Clx 搵 Pcdt (piece table) ----
+            let pos = fcClx;
+            const clxEnd = fcClx + lcbClx;
+            let plcPcdStart = -1, plcPcdLen = 0;
+            while (pos < clxEnd) {
+                const clxt = table[pos];
+                if (clxt === 0x01) {
+                    pos += 3 + tblDv.getInt16(pos + 1, true);
+                } else if (clxt === 0x02) {
+                    plcPcdLen = tblDv.getUint32(pos + 1, true);
+                    plcPcdStart = pos + 5;
+                    break;
+                } else break;
+            }
+            if (plcPcdStart < 0) throw new Error('搵唔到文字內容');
+
+            // ---- 逐個 piece 解碼 ----
+            const n = Math.floor((plcPcdLen - 4) / 12);
+            const cps = [];
+            for (let i = 0; i <= n; i++) cps.push(tblDv.getUint32(plcPcdStart + i * 4, true));
+
+            let text = '';
+            for (let i = 0; i < n; i++) {
+                const pcdOff = plcPcdStart + (n + 1) * 4 + i * 8;
+                const fcRaw = tblDv.getUint32(pcdOff + 2, true);
+                const cpLen = cps[i + 1] - cps[i];
+                if (fcRaw & 0x40000000) {
+                    // 壓縮：CP1252（每字元 1 byte）
+                    const start = (fcRaw & 0x3FFFFFFF) >>> 1;
+                    for (let j = 0; j < cpLen; j++) text += cp1252Char(wd[start + j]);
+                } else {
+                    // UTF-16LE（每字元 2 bytes）
+                    const start = fcRaw & 0x3FFFFFFF;
+                    for (let j = 0; j < cpLen; j++) text += String.fromCharCode(wdDv.getUint16(start + j * 2, true));
+                }
+            }
+
+            // 只保留主文件內文，再清理 Word 特殊字元
+            text = text.substring(0, ccpText)
+                .replace(/\x13[^\x14\x15]*\x14?/g, '')   // field codes：只留結果
+                .replace(/[\x15\x08\x01\x02\x05\x06]/g, '')
+                .replace(/\x07/g, '\t')                  // 表格 cell 分隔
+                .replace(/\r/g, '\n')                    // 段落標記
+                .replace(/[\x0B\x0C\x0E]/g, '\n')        // 手動換行/分頁
+                .replace(/[\x00\x03\x04\x0F-\x1F]/g, '');
+            return text;
+        }
+
+        // CP1252 同 Latin-1 唔同嘅 0x80-0x9F 範圍
+        const CP1252_HIGH = {
+            0x80:'\u20AC',0x82:'\u201A',0x83:'\u0192',0x84:'\u201E',0x85:'\u2026',0x86:'\u2020',
+            0x87:'\u2021',0x88:'\u02C6',0x89:'\u2030',0x8A:'\u0160',0x8B:'\u2039',0x8C:'\u0152',
+            0x8E:'\u017D',0x91:'\u2018',0x92:'\u2019',0x93:'\u201C',0x94:'\u201D',0x95:'\u2022',
+            0x96:'\u2013',0x97:'\u2014',0x98:'\u02DC',0x99:'\u2122',0x9A:'\u0161',0x9B:'\u203A',
+            0x9C:'\u0153',0x9E:'\u017E',0x9F:'\u0178'
+        };
+        function cp1252Char(b) {
+            if (b >= 0x80 && b <= 0x9F) return CP1252_HIGH[b] || '';
+            return String.fromCharCode(b);
         }
 
         /* ===== 比較功能 ===== */
@@ -253,22 +522,54 @@
             // 使用 jsdiff 進行字詞級別的對比 (diffWords)
             const diff = Diff.diffWords(textA, textB);
 
-            // 建立 HTML 來顯示 Tracked Changes
-            let displayHtml = '';
-            diff.forEach((part) => {
-                // 將換行符號轉換為 <br> 以便在 HTML 中正確顯示
-                let safeText = part.value.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            // 建立逐行結構嚟顯示 Tracked Changes（每行左邊有行號）
+            // 一個 change 如果跨行，會斬開做幾個 fragment，但共用同一個 data-cid，
+            // 撳其中一忽就會成個 change 一齊 accept
+            let cid = 0;
+            const lines = [];
+            let cur = { mergeUp: null, html: '' };
+            const escapeHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-                if (part.added) {
-                    // 新增的文字 (B 有，A 冇)
-                    displayHtml += `<span class="diff-added" onclick="acceptChange(this, 'add')">${safeText}</span>`;
-                } else if (part.removed) {
-                    // 刪除的文字 (A 有，B 冇)
-                    displayHtml += `<span class="diff-removed" onclick="acceptChange(this, 'remove')">${safeText}</span>`;
-                } else {
-                    // 無變更的文字
-                    displayHtml += safeText;
-                }
+            diff.forEach((part) => {
+                const cls = part.added ? 'diff-added' : (part.removed ? 'diff-removed' : null);
+                const action = part.added ? 'add' : 'remove';
+                const myCid = cls ? cid++ : null;
+                const segs = part.value.split('\n');
+
+                segs.forEach((seg, i) => {
+                    if (i > 0) {
+                        // 呢個換行符號本身係 change 嘅一部分
+                        if (cls === 'diff-removed') {
+                            // 被刪除嘅換行：加個 ¶ 標記俾人撳，下一行標記住「接受刪除後要合併返上一行」
+                            cur.html += `<span class="${cls}" data-cid="${myCid}" onclick="acceptChange(this, 'remove')"><span class="newline-marker">¶</span></span>`;
+                            lines.push(cur);
+                            cur = { mergeUp: myCid, html: '' };
+                        } else if (cls === 'diff-added') {
+                            // 新增嘅換行：加個 ¶ 標記（accept 時淨係移除個標記，保留換行）
+                            cur.html += `<span class="${cls}" data-cid="${myCid}" data-marker="1" onclick="acceptChange(this, 'add')"><span class="newline-marker">¶</span></span>`;
+                            lines.push(cur);
+                            cur = { mergeUp: null, html: '' };
+                        } else {
+                            lines.push(cur);
+                            cur = { mergeUp: null, html: '' };
+                        }
+                    }
+                    if (seg.length > 0) {
+                        const safe = escapeHtml(seg);
+                        if (cls) {
+                            cur.html += `<span class="${cls}" data-cid="${myCid}" onclick="acceptChange(this, '${action}')">${safe}</span>`;
+                        } else {
+                            cur.html += safe;
+                        }
+                    }
+                });
+            });
+            lines.push(cur);
+
+            let displayHtml = '';
+            lines.forEach((line) => {
+                const mergeAttr = line.mergeUp !== null ? ` data-merge-up="${line.mergeUp}"` : '';
+                displayHtml += `<div class="line"${mergeAttr}><span class="line-content">${line.html}</span></div>`;
             });
 
             boxC.innerHTML = displayHtml;
@@ -281,22 +582,44 @@
             updateNavStatus();
         }
 
-        // Accept Changes 的核心邏輯
+        // Accept Changes 的核心邏輯（成個 change group 一齊處理）
         function acceptChange(element, action) {
+            const cidValue = element.getAttribute('data-cid');
+            const group = Array.from(document.querySelectorAll(`#boxC [data-cid="${cidValue}"]`));
+
             // 如果接受咗嘅係目前高亮嗰個，或者係佢之前嘅 change，要調整 index
             const changes = getChangeList();
-            const removedIndex = changes.indexOf(element);
+            const removedIndex = changes.findIndex(g => g.cid === cidValue);
             if (removedIndex !== -1 && removedIndex <= currentChangeIndex) {
                 currentChangeIndex--;
             }
 
             if (action === 'add') {
-                // 接受新增：移除 span 標籤，保留裡面的文字
-                const textNode = document.createTextNode(element.textContent);
-                element.parentNode.replaceChild(textNode, element);
+                group.forEach((el) => {
+                    if (el.hasAttribute('data-marker')) {
+                        // 換行標記 ¶：純顯示用，accept 時直接移除（換行本身由行結構保留）
+                        el.remove();
+                    } else {
+                        // 接受新增：移除 span 標籤，保留裡面的文字
+                        const textNode = document.createTextNode(el.textContent);
+                        el.parentNode.replaceChild(textNode, el);
+                    }
+                });
             } else if (action === 'remove') {
-                // 接受刪除：直接將整個 span 從畫面上移除
-                element.remove();
+                // 接受刪除：將所有 fragment 從畫面上移除
+                group.forEach((el) => el.remove());
+                // 如果刪除嘅內容包括換行符號，將受影響嘅行合併返上一行（行號會自動更新）
+                document.querySelectorAll(`#boxC .line[data-merge-up="${cidValue}"]`).forEach((line) => {
+                    const prev = line.previousElementSibling;
+                    if (prev && prev.classList.contains('line')) {
+                        const prevContent = prev.querySelector('.line-content');
+                        const content = line.querySelector('.line-content');
+                        while (content.firstChild) prevContent.appendChild(content.firstChild);
+                        line.remove();
+                    } else {
+                        line.removeAttribute('data-merge-up');
+                    }
+                });
             }
 
             updateNavStatus();
@@ -305,7 +628,18 @@
         /* ===== 跳轉功能（keyboard + swipe） ===== */
         function getChangeList() {
             // 每次都重新查詢，因為 accept 咗嘅 change 會消失
-            return Array.from(document.querySelectorAll('#boxC .diff-added, #boxC .diff-removed'));
+            // 跨行嘅 change fragments 會 group 埋一齊當一個 change
+            const spans = document.querySelectorAll('#boxC .diff-added, #boxC .diff-removed');
+            const groups = [];
+            const seenCids = new Set();
+            spans.forEach((sp) => {
+                const c = sp.getAttribute('data-cid');
+                if (!seenCids.has(c)) {
+                    seenCids.add(c);
+                    groups.push({ cid: c, first: sp });
+                }
+            });
+            return groups;
         }
 
         function jumpToChange(direction) {
@@ -324,13 +658,13 @@
                 }
             }
 
-            // 移除所有舊高亮，加上新高亮
-            changes.forEach(c => c.classList.remove('diff-current'));
+            // 移除所有舊高亮，將目前 change group 嘅所有 fragments 一齊高亮
+            document.querySelectorAll('#boxC .diff-current').forEach(el => el.classList.remove('diff-current'));
             const target = changes[currentChangeIndex];
-            target.classList.add('diff-current');
+            document.querySelectorAll(`#boxC [data-cid="${target.cid}"]`).forEach(el => el.classList.add('diff-current'));
 
             // 畫面直接跳去嗰個 change 嘅位置（置中顯示）
-            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            target.first.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
             updateNavStatus();
         }
