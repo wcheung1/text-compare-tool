@@ -33,6 +33,36 @@
             margin-bottom: 5px;
             color: #34495e;
         }
+        .label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        .label-row label {
+            margin-bottom: 0;
+        }
+        .upload-btn {
+            background-color: #95a5a6;
+            color: white;
+            border: none;
+            padding: 6px 14px;
+            font-size: 13px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+        .upload-btn:hover {
+            background-color: #7f8c8d;
+        }
+        .file-name {
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-top: 4px;
+            min-height: 15px;
+            word-break: break-all;
+        }
         textarea {
             width: 100%;
             height: 250px;
@@ -48,7 +78,7 @@
             text-align: center;
             margin-bottom: 20px;
         }
-        button {
+        button#compareBtn {
             background-color: #3498db;
             color: white;
             border: none;
@@ -59,7 +89,7 @@
             transition: background-color 0.3s;
             font-weight: bold;
         }
-        button:hover {
+        button#compareBtn:hover {
             background-color: #2980b9;
         }
         #boxC {
@@ -74,7 +104,7 @@
             white-space: pre-wrap; /* 保留換行符號 */
             box-shadow: 0 4px 6px rgba(0,0,0,0.05);
         }
-        
+
         /* Tracked Changes 的樣式設計 */
         .diff-added {
             background-color: #e6ffed;
@@ -106,7 +136,33 @@
             color: gray;
             text-decoration: none;
         }
-        
+
+        /* 目前跳轉到嘅 change 高亮效果 */
+        .diff-current {
+            outline: 3px solid #f39c12;
+            outline-offset: 1px;
+            box-shadow: 0 0 8px rgba(243, 156, 18, 0.6);
+        }
+
+        /* 跳轉狀態列 */
+        #navStatus {
+            display: none;
+            position: sticky;
+            top: 10px;
+            z-index: 10;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        #navStatus span {
+            display: inline-block;
+            background-color: #2c3e50;
+            color: #fff;
+            font-size: 13px;
+            padding: 6px 16px;
+            border-radius: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+
         #instruction {
             font-size: 13px;
             color: #7f8c8d;
@@ -122,24 +178,66 @@
 
     <div class="container">
         <div class="box-wrapper">
-            <label for="boxA">Text Box A (Original 原文):</label>
-            <textarea id="boxA" placeholder="請在此貼上原文..."></textarea>
+            <div class="label-row">
+                <label for="boxA">Text Box A (Original 原文):</label>
+                <button type="button" class="upload-btn" onclick="document.getElementById('fileA').click()">📂 上載檔案</button>
+            </div>
+            <input type="file" id="fileA" style="display: none;" onchange="loadFileIntoBox(this, 'boxA', 'fileNameA')">
+            <textarea id="boxA" placeholder="請在此貼上原文，或者撳「上載檔案」揀一個純文字檔（.txt / .py / .html 等）..."></textarea>
+            <div class="file-name" id="fileNameA"></div>
         </div>
         <div class="box-wrapper">
-            <label for="boxB">Text Box B (Revised 修改版):</label>
-            <textarea id="boxB" placeholder="請在此貼上修改後的文件..."></textarea>
+            <div class="label-row">
+                <label for="boxB">Text Box B (Revised 修改版):</label>
+                <button type="button" class="upload-btn" onclick="document.getElementById('fileB').click()">📂 上載檔案</button>
+            </div>
+            <input type="file" id="fileB" style="display: none;" onchange="loadFileIntoBox(this, 'boxB', 'fileNameB')">
+            <textarea id="boxB" placeholder="請在此貼上修改後的文件，或者撳「上載檔案」揀一個純文字檔..."></textarea>
+            <div class="file-name" id="fileNameB"></div>
         </div>
     </div>
 
     <div class="btn-container">
         <button id="compareBtn" onclick="performComparison()">比較</button>
-        <p id="instruction">提示：在下方的 Text Box C 中，<strong>點擊</strong>綠色底線文字以接受新增，<strong>點擊</strong>紅色刪除線文字以接受刪除。</p>
+        <p id="instruction">提示：在下方的 Text Box C 中，<strong>點擊</strong>綠色底線文字以接受新增，<strong>點擊</strong>紅色刪除線文字以接受刪除。<br>
+        用 <strong>鍵盤 ← / →</strong> 或者喺手機上 <strong>左右 swipe</strong>，可以跳去上一個 / 下一個 change。</p>
     </div>
+
+    <div id="navStatus"><span id="navStatusText"></span></div>
 
     <label for="boxC" id="labelC" style="display: none;">Text Box C (對比結果 - 可點擊以 Accept Changes):</label>
     <div id="boxC"></div>
 
     <script>
+        /* ===== 檔案上載功能 ===== */
+        function loadFileIntoBox(inputElement, boxId, fileNameId) {
+            const file = inputElement.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const content = e.target.result;
+                // 簡單檢查係唔係純文字檔（binary 檔通常會有大量 null 字元）
+                if (content.indexOf('\u0000') !== -1) {
+                    alert('呢個檔案似乎唔係純文字檔（可能係 binary 檔），請揀一個用 Notepad 開得到嘅檔案。');
+                    inputElement.value = '';
+                    return;
+                }
+                document.getElementById(boxId).value = content;
+                document.getElementById(fileNameId).textContent = '已載入：' + file.name;
+            };
+            reader.onerror = function() {
+                alert('讀取檔案時發生錯誤，請再試一次。');
+            };
+            reader.readAsText(file, 'UTF-8');
+
+            // 清空 input value，令到揀返同一個檔案都會再觸發 onchange
+            inputElement.value = '';
+        }
+
+        /* ===== 比較功能 ===== */
+        let currentChangeIndex = -1; // 目前跳轉到嘅 change（-1 = 未開始）
+
         function performComparison() {
             const textA = document.getElementById('boxA').value;
             const textB = document.getElementById('boxB').value;
@@ -154,13 +252,13 @@
 
             // 使用 jsdiff 進行字詞級別的對比 (diffWords)
             const diff = Diff.diffWords(textA, textB);
-            
+
             // 建立 HTML 來顯示 Tracked Changes
             let displayHtml = '';
             diff.forEach((part) => {
                 // 將換行符號轉換為 <br> 以便在 HTML 中正確顯示
                 let safeText = part.value.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                
+
                 if (part.added) {
                     // 新增的文字 (B 有，A 冇)
                     displayHtml += `<span class="diff-added" onclick="acceptChange(this, 'add')">${safeText}</span>`;
@@ -177,10 +275,21 @@
             boxC.style.display = 'block';
             labelC.style.display = 'block';
             instruction.style.display = 'block';
+
+            // 重設跳轉狀態
+            currentChangeIndex = -1;
+            updateNavStatus();
         }
 
         // Accept Changes 的核心邏輯
         function acceptChange(element, action) {
+            // 如果接受咗嘅係目前高亮嗰個，或者係佢之前嘅 change，要調整 index
+            const changes = getChangeList();
+            const removedIndex = changes.indexOf(element);
+            if (removedIndex !== -1 && removedIndex <= currentChangeIndex) {
+                currentChangeIndex--;
+            }
+
             if (action === 'add') {
                 // 接受新增：移除 span 標籤，保留裡面的文字
                 const textNode = document.createTextNode(element.textContent);
@@ -189,7 +298,114 @@
                 // 接受刪除：直接將整個 span 從畫面上移除
                 element.remove();
             }
+
+            updateNavStatus();
         }
+
+        /* ===== 跳轉功能（keyboard + swipe） ===== */
+        function getChangeList() {
+            // 每次都重新查詢，因為 accept 咗嘅 change 會消失
+            return Array.from(document.querySelectorAll('#boxC .diff-added, #boxC .diff-removed'));
+        }
+
+        function jumpToChange(direction) {
+            const changes = getChangeList();
+            if (changes.length === 0) return;
+
+            if (direction === 'next') {
+                currentChangeIndex++;
+                if (currentChangeIndex >= changes.length) {
+                    currentChangeIndex = 0; // 到咗最尾就返去第一個
+                }
+            } else {
+                currentChangeIndex--;
+                if (currentChangeIndex < 0) {
+                    currentChangeIndex = changes.length - 1; // 喺第一個再向前就跳去最尾
+                }
+            }
+
+            // 移除所有舊高亮，加上新高亮
+            changes.forEach(c => c.classList.remove('diff-current'));
+            const target = changes[currentChangeIndex];
+            target.classList.add('diff-current');
+
+            // 畫面直接跳去嗰個 change 嘅位置（置中顯示）
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            updateNavStatus();
+        }
+
+        function updateNavStatus() {
+            const navStatus = document.getElementById('navStatus');
+            const navStatusText = document.getElementById('navStatusText');
+            const changes = getChangeList();
+            const boxCVisible = document.getElementById('boxC').style.display === 'block';
+
+            if (!boxCVisible) {
+                navStatus.style.display = 'none';
+                return;
+            }
+
+            navStatus.style.display = 'block';
+            if (changes.length === 0) {
+                navStatusText.textContent = '✔ 冇（剩餘嘅）changes';
+                return;
+            }
+            if (currentChangeIndex >= 0 && currentChangeIndex < changes.length) {
+                navStatusText.textContent = 'Change ' + (currentChangeIndex + 1) + ' / ' + changes.length;
+            } else {
+                navStatusText.textContent = '共 ' + changes.length + ' 個 changes（撳 ← / → 或 swipe 跳轉）';
+            }
+        }
+
+        // ---- Keyboard：左右鍵 ----
+        document.addEventListener('keydown', function(e) {
+            // 如果正喺 textarea 或 input 度打字，唔好搶走左右鍵
+            const tag = document.activeElement.tagName;
+            if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+
+            // 未撳過比較就唔理
+            if (document.getElementById('boxC').style.display !== 'block') return;
+
+            if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                jumpToChange('next');
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                jumpToChange('prev');
+            }
+        });
+
+        // ---- 手機：左右 swipe ----
+        let touchStartX = 0;
+        let touchStartY = 0;
+
+        document.addEventListener('touchstart', function(e) {
+            touchStartX = e.changedTouches[0].clientX;
+            touchStartY = e.changedTouches[0].clientY;
+        }, { passive: true });
+
+        document.addEventListener('touchend', function(e) {
+            // 未撳過比較就唔理
+            if (document.getElementById('boxC').style.display !== 'block') return;
+
+            // 喺 textarea 上面 swipe 就唔理（可能係想 scroll 或者揀字）
+            if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+
+            const dx = e.changedTouches[0].clientX - touchStartX;
+            const dy = e.changedTouches[0].clientY - touchStartY;
+
+            // 橫向移動要夠 50px，而且橫向幅度要大過縱向（避免同上下 scroll 撞）
+            if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+                if (dx > 0) {
+                    // swipe 向右 → 下一個 change
+                    jumpToChange('next');
+                } else {
+                    // swipe 向左 → 上一個 change
+                    jumpToChange('prev');
+                }
+            }
+        }, { passive: true });
     </script>
 </body>
 </html>
