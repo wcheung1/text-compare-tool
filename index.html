@@ -6,6 +6,7 @@
     <title>文件變更對比工具</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/7.0.0/diff.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.11.0/mammoth.browser.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/full.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -92,6 +93,33 @@
         }
         button#compareBtn:hover {
             background-color: #2980b9;
+        }
+
+        /* 簡繁轉換按鈕 */
+        .convert-btn-container {
+            text-align: center;
+            margin-bottom: 15px;
+        }
+        button.convert-btn {
+            background-color: #27ae60;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            font-size: 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-weight: bold;
+            margin: 0 8px;
+        }
+        button.convert-btn:hover {
+            background-color: #229954;
+        }
+        button.convert-btn.t2s {
+            background-color: #8e44ad;
+        }
+        button.convert-btn.t2s:hover {
+            background-color: #7d3c98;
         }
         #boxC {
             display: none; /* 預設隱藏，撳對比後先顯示 */
@@ -234,6 +262,11 @@
             <textarea id="boxB" placeholder="請在此貼上修改後的文件，或者撳「上載檔案」揀一個純文字檔..."></textarea>
             <div class="file-name" id="fileNameB"></div>
         </div>
+    </div>
+
+    <div class="convert-btn-container">
+        <button type="button" class="convert-btn s2t" onclick="convertS2T()">簡 ➔ 繁（Text Box A → B）</button>
+        <button type="button" class="convert-btn t2s" onclick="convertT2S()">繁 ➔ 簡（Text Box A → B）</button>
     </div>
 
     <div class="btn-container">
@@ -502,6 +535,37 @@
         function cp1252Char(b) {
             if (b >= 0x80 && b <= 0x9F) return CP1252_HIGH[b] || '';
             return String.fromCharCode(b);
+        }
+
+        /* ===== 簡繁轉換功能（使用 opencc-js）===== */
+        let s2tConverter = null; // 簡 ➔ 繁
+        let t2sConverter = null; // 繁 ➔ 簡
+
+        function convertS2T() {
+            const textA = document.getElementById('boxA').value;
+            if (!textA) {
+                alert('Text Box A 沒有內容，請先輸入文字！');
+                return;
+            }
+            // 懶加載：第一次撳掣先建立 converter
+            if (!s2tConverter) {
+                s2tConverter = OpenCC.Converter({ from: 'cn', to: 't' });
+            }
+            // cn → t（通用繁體）：只做字符級別轉換，唔會觸發地區性詞彙替換（例如唔會將「用户」變成「使用者」）
+            // 非中文字符（英文、標點符號等）會原封不動保留
+            document.getElementById('boxB').value = s2tConverter(textA);
+        }
+
+        function convertT2S() {
+            const textA = document.getElementById('boxA').value;
+            if (!textA) {
+                alert('Text Box A 沒有內容，請先輸入文字！');
+                return;
+            }
+            if (!t2sConverter) {
+                t2sConverter = OpenCC.Converter({ from: 't', to: 'cn' });
+            }
+            document.getElementById('boxB').value = t2sConverter(textA);
         }
 
         /* ===== 比較功能 ===== */
