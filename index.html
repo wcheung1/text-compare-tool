@@ -538,8 +538,25 @@
         }
 
         /* ===== 簡繁轉換功能（使用 opencc-js）===== */
-        let s2tConverter = null; // 簡 ➔ 繁
+        let s2tConverter = null; // 簡 ➔ 繁（香港繁體）
         let t2sConverter = null; // 繁 ➔ 簡
+
+        /* ---- 簡轉繁後處理：修正 OpenCC 一對多映射嘅常見錯誤 ----
+           問題根源：簡體「钟」同時對應繁體「鐘」（時鐘/時間）同「鍾」（鍾意/姓氏），
+           OpenCC 嘅預設詞庫未必涵蓋粵語口語（例如「半個鐘」），所以需要後處理。
+           策略：先將所有「鍾」當做「鐘」（因為時間用法遠比感情/姓氏常見），
+                 再還原特定嘅「鍾」詞彙。 */
+        function postCorrectS2T(text) {
+            return text
+                // === 鐘 / 鍾 一對多修正 ===
+                .replace(/鍾/g, '鐘')                    // 先全部當做「鐘」
+                .replace(/鐘意/g, '鍾意')                 // 還原：鍾意（喜歡）
+                .replace(/鐘情/g, '鍾情')                 // 還原：鍾情
+                .replace(/鐘愛/g, '鍾愛')                 // 還原：鍾愛
+                .replace(/一見鐘情/g, '一見鍾情')          // 還原：一見鍾情
+                .replace(/情有獨鐘/g, '情有獨鍾')          // 還原：情有獨鍾
+                .replace(/鐘靈毓秀/g, '鍾靈毓秀');         // 還原：鍾靈毓秀（成語）
+        }
 
         function convertS2T() {
             const textA = document.getElementById('boxA').value;
@@ -549,11 +566,15 @@
             }
             // 懶加載：第一次撳掣先建立 converter
             if (!s2tConverter) {
-                s2tConverter = OpenCC.Converter({ from: 'cn', to: 't' });
+                // 用 hk（香港繁體）而唔係 t（通用繁體）：
+                //   hk 會用香港標準字體（為、眾、裡），唔會出異體字（爲、衆）
+                //   hk 唔會做地區性詞彙替換（用户唔會變使用者，嗰個係 tw/twp 先有）
+                s2tConverter = OpenCC.Converter({ from: 'cn', to: 'hk' });
             }
-            // cn → t（通用繁體）：只做字符級別轉換，唔會觸發地區性詞彙替換（例如唔會將「用户」變成「使用者」）
+            // cn → hk（香港繁體）：用香港標準字符 + 詞組級別一對多消歧
             // 非中文字符（英文、標點符號等）會原封不動保留
-            document.getElementById('boxB').value = s2tConverter(textA);
+            // 之後再做後處理修正剩餘嘅一對多問題
+            document.getElementById('boxB').value = postCorrectS2T(s2tConverter(textA));
         }
 
         function convertT2S() {
@@ -565,6 +586,7 @@
             if (!t2sConverter) {
                 t2sConverter = OpenCC.Converter({ from: 't', to: 'cn' });
             }
+            // 繁轉簡冇一對多問題（多個繁體字都映射返同一個簡體字），唔需要後處理
             document.getElementById('boxB').value = t2sConverter(textA);
         }
 
