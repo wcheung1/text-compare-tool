@@ -7,6 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/7.0.0/diff.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.11.0/mammoth.browser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -254,6 +255,30 @@
             box-shadow: 0 2px 5px rgba(0,0,0,0.2);
         }
 
+        /* 匯出按鈕 */
+        #boxCHeader {
+            display: none; /* 撳對比後先顯示 */
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .export-btn {
+            color: white;
+            border: none;
+            padding: 6px 14px;
+            font-size: 13px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+            white-space: nowrap;
+        }
+        .export-btn.html { background-color: #e67e22; }
+        .export-btn.html:hover { background-color: #ca6f1e; }
+        .export-btn.pdf { background-color: #c0392b; }
+        .export-btn.pdf:hover { background-color: #a93226; }
+        .export-btn.docx { background-color: #2980b9; }
+        .export-btn.docx:hover { background-color: #216694; }
+
         #instruction {
             font-size: 13px;
             color: #7f8c8d;
@@ -307,7 +332,14 @@
 
     <div id="navStatus"><span id="navStatusText"></span></div>
 
-    <label for="boxC" id="labelC" style="display: none;">Text Box C (對比結果 - 可點擊以 Accept Changes):</label>
+    <div class="label-row" id="boxCHeader">
+        <label for="boxC" id="labelC">Text Box C (對比結果 - 可點擊以 Accept Changes):</label>
+        <div class="label-btn-group">
+            <button type="button" class="export-btn html" onclick="exportAsHtml()">🌐 匯出 HTML</button>
+            <button type="button" class="export-btn pdf" onclick="exportAsPdf()">📄 匯出 PDF</button>
+            <button type="button" class="export-btn docx" onclick="exportAsDocx()">📝 匯出 DOCX</button>
+        </div>
+    </div>
     <div id="boxC"></div>
 
     <script>
@@ -677,7 +709,7 @@
             const textA = document.getElementById('boxA').value;
             const textB = document.getElementById('boxB').value;
             const boxC = document.getElementById('boxC');
-            const labelC = document.getElementById('labelC');
+            const boxCHeader = document.getElementById('boxCHeader');
             const instruction = document.getElementById('instruction');
 
             if (!textA && !textB) {
@@ -740,7 +772,7 @@
 
             boxC.innerHTML = displayHtml;
             boxC.style.display = 'block';
-            labelC.style.display = 'block';
+            boxCHeader.style.display = 'flex';
             instruction.style.display = 'block';
 
             // 重設跳轉狀態
@@ -789,6 +821,428 @@
             }
 
             updateNavStatus();
+        }
+
+        /* ==========================================================
+           匯出功能：HTML（可點擊 accept）/ PDF / DOCX（Word Track Changes）
+           全部都係根據 Box C 「目前」嘅狀態嚟做，
+           即係你喺畫面上已經 accept 咗嘅 change，唔會再出現喺匯出檔入面。
+           ========================================================== */
+
+        const EXPORT_AUTHOR = '文件變更對比工具';
+
+        function isResultReady() {
+            const boxC = document.getElementById('boxC');
+            if (!boxC || boxC.style.display !== 'block') {
+                alert('請先撳「比較」產生對比結果，之後先可以匯出。');
+                return false;
+            }
+            return true;
+        }
+
+        function exportTimestamp() {
+            const d = new Date();
+            const p = (n) => String(n).padStart(2, '0');
+            return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes());
+        }
+
+        function nowText() {
+            const d = new Date();
+            const p = (n) => String(n).padStart(2, '0');
+            return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+        }
+
+        // 觸發瀏覽器下載（即係 Save As 落 local drive）
+        function downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, 1000);
+        }
+
+        // 取一份乾淨嘅 Box C 副本：去咗 onclick 同高亮，但保留 data-cid / data-marker / data-merge-up
+        function getCleanResultClone() {
+            const clone = document.getElementById('boxC').cloneNode(true);
+            clone.querySelectorAll('.diff-current').forEach((el) => el.classList.remove('diff-current'));
+            clone.querySelectorAll('[onclick]').forEach((el) => el.removeAttribute('onclick'));
+            return clone;
+        }
+
+        /* ---------- 1) 匯出 HTML（保留點擊 accept changes 功能） ---------- */
+
+        const EXPORT_HTML_SCRIPT = `
+(function () {
+    var root = document.getElementById('diffRoot');
+    var originalHtml = root.innerHTML;
+    var statusText = document.getElementById('statusText');
+
+    function countChanges() {
+        var spans = root.querySelectorAll('.diff-added, .diff-removed');
+        var seen = {};
+        var n = 0;
+        for (var i = 0; i < spans.length; i++) {
+            var c = spans[i].getAttribute('data-cid');
+            if (!seen[c]) { seen[c] = 1; n++; }
+        }
+        return n;
+    }
+
+    function updateStatus() {
+        var n = countChanges();
+        statusText.textContent = (n === 0) ? '✔ 冇（剩餘嘅）changes' : ('剩餘 ' + n + ' 個 changes');
+    }
+
+    // 同原本工具一模一樣嘅 accept 邏輯（成個 change group 一齊處理）
+    function acceptElement(el) {
+        var isAdd = el.className.indexOf('diff-added') !== -1;
+        var cid = el.getAttribute('data-cid');
+        var group = root.querySelectorAll('[data-cid="' + cid + '"]');
+        var i;
+
+        if (isAdd) {
+            for (i = 0; i < group.length; i++) {
+                var node = group[i];
+                if (node.hasAttribute('data-marker')) {
+                    node.parentNode.removeChild(node);
+                } else {
+                    node.parentNode.replaceChild(document.createTextNode(node.textContent), node);
+                }
+            }
+        } else {
+            for (i = 0; i < group.length; i++) {
+                group[i].parentNode.removeChild(group[i]);
+            }
+            var merged = root.querySelectorAll('.line[data-merge-up="' + cid + '"]');
+            for (i = 0; i < merged.length; i++) {
+                var line = merged[i];
+                var prev = line.previousElementSibling;
+                if (prev && prev.className.indexOf('line') !== -1) {
+                    var prevContent = prev.querySelector('.line-content');
+                    var content = line.querySelector('.line-content');
+                    while (content.firstChild) { prevContent.appendChild(content.firstChild); }
+                    line.parentNode.removeChild(line);
+                } else {
+                    line.removeAttribute('data-merge-up');
+                }
+            }
+        }
+        updateStatus();
+    }
+
+    root.addEventListener('click', function (e) {
+        var t = e.target;
+        while (t && t !== root) {
+            if (t.className && typeof t.className === 'string' &&
+                (t.className.indexOf('diff-added') !== -1 || t.className.indexOf('diff-removed') !== -1)) {
+                acceptElement(t);
+                return;
+            }
+            t = t.parentNode;
+        }
+    });
+
+    document.getElementById('btnAcceptAll').addEventListener('click', function () {
+        var guard = 0;
+        var el = root.querySelector('.diff-added, .diff-removed');
+        while (el && guard++ < 200000) {
+            acceptElement(el);
+            el = root.querySelector('.diff-added, .diff-removed');
+        }
+    });
+
+    document.getElementById('btnReset').addEventListener('click', function () {
+        root.innerHTML = originalHtml;
+        updateStatus();
+    });
+
+    document.getElementById('btnPrint').addEventListener('click', function () {
+        window.print();
+    });
+
+    updateStatus();
+})();
+`;
+
+        function exportHtmlCss() {
+            return [
+                'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft JhengHei", sans-serif; background-color: #f4f7f6; color: #333; max-width: 1200px; margin: 0 auto; padding: 20px; }',
+                'h1 { text-align: center; color: #2c3e50; font-size: 22px; margin-bottom: 5px; }',
+                '.meta { text-align: center; color: #7f8c8d; font-size: 13px; margin-bottom: 15px; }',
+                '.toolbar { text-align: center; margin-bottom: 12px; }',
+                '.toolbar button { border: none; color: #fff; padding: 8px 18px; font-size: 13px; font-weight: bold; border-radius: 5px; cursor: pointer; margin: 0 5px; }',
+                '.btn-accept-all { background-color: #27ae60; }',
+                '.btn-reset { background-color: #95a5a6; }',
+                '.btn-print { background-color: #3498db; }',
+                '.hint { font-size: 13px; color: #7f8c8d; text-align: center; margin-bottom: 12px; }',
+                '.status { text-align: center; margin-bottom: 12px; }',
+                '.status span { display: inline-block; background-color: #2c3e50; color: #fff; font-size: 13px; padding: 6px 16px; border-radius: 20px; }',
+                '.diff-body { background-color: #fff; padding: 20px 20px 20px 0; border: 1px solid #ccc; border-radius: 6px; min-height: 100px; font-size: 15px; line-height: 1.8; box-shadow: 0 4px 6px rgba(0,0,0,0.05); counter-reset: line; }',
+                '.line { display: flex; min-height: 1.8em; }',
+                '.line::before { counter-increment: line; content: counter(line); flex: 0 0 3em; text-align: right; padding-right: 10px; margin-right: 12px; color: #95a5a6; font-size: 12px; line-height: 2.2; font-family: Consolas, Menlo, monospace; border-right: 1px solid #e8e8e8; user-select: none; }',
+                '.line-content { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }',
+                '.newline-marker { opacity: 0.55; font-size: 12px; }',
+                '.diff-added { background-color: #e6ffed; color: #22863a; text-decoration: underline; cursor: pointer; padding: 2px; border-radius: 3px; }',
+                '.diff-removed { background-color: #ffeef0; color: #cb2431; text-decoration: line-through; cursor: pointer; padding: 2px; border-radius: 3px; }',
+                '.diff-added:hover::after { content: " (點擊接受新增)"; font-size: 12px; color: gray; text-decoration: none; }',
+                '.diff-removed:hover::after { content: " (點擊接受刪除)"; font-size: 12px; color: gray; text-decoration: none; }',
+                '@media print { body { background: #fff; max-width: none; padding: 0; } .toolbar, .hint, .status { display: none !important; } .diff-body { border: none; box-shadow: none; padding: 0; } .line { page-break-inside: avoid; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }'
+            ].join('\n');
+        }
+
+        function exportAsHtml() {
+            if (!isResultReady()) return;
+            const inner = getCleanResultClone().innerHTML;
+
+            const doc = '<!DOCTYPE html>\n' +
+                '<html lang="zh-HK">\n<head>\n' +
+                '<meta charset="UTF-8">\n' +
+                '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+                '<title>文件變更對比結果</title>\n' +
+                '<style>\n' + exportHtmlCss() + '\n</style>\n' +
+                '</head>\n<body>\n' +
+                '<h1>文件變更對比結果</h1>\n' +
+                '<div class="meta">匯出時間：' + nowText() + '</div>\n' +
+                '<div class="toolbar">' +
+                '<button type="button" id="btnAcceptAll" class="btn-accept-all">✔ 全部接受</button>' +
+                '<button type="button" id="btnReset" class="btn-reset">↺ 還原</button>' +
+                '<button type="button" id="btnPrint" class="btn-print">🖨 列印 / 存為 PDF</button>' +
+                '</div>\n' +
+                '<div class="hint"><strong>點擊</strong>綠色底線文字 = 接受新增；<strong>點擊</strong>紅色刪除線文字 = 接受刪除。¶ 代表段落換行嘅變更。</div>\n' +
+                '<div class="status"><span id="statusText"></span></div>\n' +
+                '<div class="diff-body" id="diffRoot">' + inner + '</div>\n' +
+                '<script>' + EXPORT_HTML_SCRIPT + '<\/script>\n' +
+                '</body>\n</html>';
+
+            downloadBlob(new Blob([doc], { type: 'text/html;charset=utf-8' }),
+                         '對比結果_' + exportTimestamp() + '.html');
+        }
+
+        /* ---------- 2) 匯出 PDF（開一個列印視窗，喺目的地揀「另存為 PDF」） ---------- */
+
+        function printCss() {
+            return [
+                '@page { size: A4; margin: 15mm; }',
+                '* { -webkit-print-color-adjust: exact; print-color-adjust: exact; }',
+                'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft JhengHei", sans-serif; color: #333; margin: 0; padding: 24px; background: #fff; }',
+                'h1 { font-size: 20px; color: #2c3e50; text-align: center; margin: 0 0 4px; }',
+                '.meta { text-align: center; color: #7f8c8d; font-size: 12px; margin-bottom: 10px; }',
+                '.legend { text-align: center; font-size: 12px; color: #555; margin-bottom: 18px; }',
+                '.legend .s-add { background-color: #e6ffed; color: #22863a; text-decoration: underline; padding: 1px 4px; border-radius: 3px; }',
+                '.legend .s-del { background-color: #ffeef0; color: #cb2431; text-decoration: line-through; padding: 1px 4px; border-radius: 3px; }',
+                '.notice { background: #fff8e1; border: 1px solid #f0c36d; color: #7a5c00; font-size: 13px; padding: 10px 14px; border-radius: 6px; margin-bottom: 18px; line-height: 1.6; }',
+                '.notice button { background: #c0392b; color: #fff; border: none; padding: 6px 14px; border-radius: 5px; font-size: 13px; font-weight: bold; cursor: pointer; margin-left: 6px; }',
+                '.diff-body { font-size: 14px; line-height: 1.8; }',
+                '.line { display: flex; page-break-inside: avoid; break-inside: avoid; }',
+                '.line-no { flex: 0 0 3em; text-align: right; padding-right: 10px; margin-right: 12px; color: #95a5a6; font-size: 11px; line-height: 2.3; font-family: Consolas, Menlo, monospace; border-right: 1px solid #e8e8e8; }',
+                '.line-content { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }',
+                '.newline-marker { opacity: 0.55; font-size: 11px; }',
+                '.diff-added { background-color: #e6ffed; color: #22863a; text-decoration: underline; padding: 1px 2px; border-radius: 3px; }',
+                '.diff-removed { background-color: #ffeef0; color: #cb2431; text-decoration: line-through; padding: 1px 2px; border-radius: 3px; }',
+                '@media print { .no-print { display: none !important; } body { padding: 0; } }'
+            ].join('\n');
+        }
+
+        function exportAsPdf() {
+            if (!isResultReady()) return;
+
+            // 行號改用真文字（唔靠 CSS counter），確保列印引擎一定畫得出
+            const clone = getCleanResultClone();
+            clone.querySelectorAll('.line').forEach((line, i) => {
+                const no = document.createElement('span');
+                no.className = 'line-no';
+                no.textContent = String(i + 1);
+                line.insertBefore(no, line.firstChild);
+            });
+
+            const doc = '<!DOCTYPE html>\n' +
+                '<html lang="zh-HK">\n<head>\n' +
+                '<meta charset="UTF-8">\n' +
+                '<title>對比結果_' + exportTimestamp() + '</title>\n' +
+                '<style>\n' + printCss() + '\n</style>\n' +
+                '</head>\n<body>\n' +
+                '<div class="notice no-print">📄 <strong>存做 PDF 嘅方法：</strong>喺跟住彈出嘅列印視窗，將「目的地 / Destination」揀做 <strong>「另存為 PDF / Save as PDF」</strong>，再撳「儲存」就會存落你個 local drive。<br>' +
+                '（建議喺「更多設定」開啟「背景圖形 / Background graphics」，咁樣新增同刪除嘅底色先會印得出。）' +
+                '<button type="button" onclick="window.print()">再次列印</button></div>\n' +
+                '<h1>文件變更對比結果</h1>\n' +
+                '<div class="meta">匯出時間：' + nowText() + '</div>\n' +
+                '<div class="legend"><span class="s-add">新增</span>　<span class="s-del">刪除</span>　（¶ = 段落換行嘅變更）</div>\n' +
+                '<div class="diff-body">' + clone.innerHTML + '</div>\n' +
+                '<script>window.onload = function () { setTimeout(function () { window.print(); }, 400); };<\/script>\n' +
+                '</body>\n</html>';
+
+            const win = window.open('', '_blank');
+            if (!win) {
+                alert('瀏覽器阻止咗彈出視窗。請喺網址列右邊允許本頁彈出視窗，然後再撳一次「匯出 PDF」。');
+                return;
+            }
+            win.document.open();
+            win.document.write(doc);
+            win.document.close();
+        }
+
+        /* ---------- 3) 匯出 DOCX（真正嘅 Word Track Changes） ---------- */
+
+        // 將 Box C 目前嘅狀態拆返做「一行行 + 每行嘅片段」
+        // paraMark: 'ins' = 呢一行嘅段落標記係新增；'del' = 段落標記被刪除（accept 之後會同下一行合併）
+        function collectDiffLines() {
+            const result = [];
+            document.querySelectorAll('#boxC .line').forEach((lineEl) => {
+                const content = lineEl.querySelector('.line-content');
+                const segs = [];
+                let paraMark = null;
+                if (content) {
+                    Array.prototype.forEach.call(content.childNodes, (node) => {
+                        if (node.nodeType === 3) { // 文字節點
+                            if (node.nodeValue) {
+                                segs.push({ type: 'eq', text: node.nodeValue });
+                                paraMark = null;
+                            }
+                            return;
+                        }
+                        if (node.nodeType !== 1) return;
+                        const isAdded = node.classList.contains('diff-added');
+                        const isRemoved = node.classList.contains('diff-removed');
+                        // ¶ 標記：代表段落標記本身嘅變更，唔可以當普通文字
+                        if (node.querySelector && node.querySelector('.newline-marker')) {
+                            paraMark = isAdded ? 'ins' : (isRemoved ? 'del' : null);
+                            return;
+                        }
+                        const text = node.textContent;
+                        if (!text) return;
+                        segs.push({ type: isAdded ? 'ins' : (isRemoved ? 'del' : 'eq'), text: text });
+                        paraMark = null;
+                    });
+                }
+                result.push({ segs: segs, paraMark: paraMark });
+            });
+            return result;
+        }
+
+        function xmlEscape(s) {
+            return String(s)
+                .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        // 一個 run；被刪除嘅文字要用 <w:delText>
+        function docxRun(text, kind) {
+            const tag = (kind === 'del') ? 'w:delText' : 'w:t';
+            const parts = String(text).split('\t');
+            let inner = '';
+            parts.forEach((p, i) => {
+                if (i > 0) inner += '<w:tab/>';
+                if (p) inner += '<' + tag + ' xml:space="preserve">' + xmlEscape(p) + '</' + tag + '>';
+            });
+            return inner ? '<w:r>' + inner + '</w:r>' : '';
+        }
+
+        function buildDocumentXml(lines) {
+            let id = 1;
+            const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+            const meta = ' w:author="' + xmlEscape(EXPORT_AUTHOR) + '" w:date="' + stamp + '"';
+            let body = '';
+
+            lines.forEach((line) => {
+                let pPr = '';
+                if (line.paraMark === 'ins') {
+                    // 段落標記係新增：Word 入面 accept 就保留分段，reject 就合併返
+                    pPr = '<w:pPr><w:rPr><w:ins w:id="' + (id++) + '"' + meta + '/></w:rPr></w:pPr>';
+                } else if (line.paraMark === 'del') {
+                    // 段落標記被刪除：Word 入面 accept 就同下一段合併
+                    pPr = '<w:pPr><w:rPr><w:del w:id="' + (id++) + '"' + meta + '/></w:rPr></w:pPr>';
+                }
+
+                let inner = '';
+                line.segs.forEach((seg) => {
+                    if (!seg.text) return;
+                    if (seg.type === 'ins') {
+                        inner += '<w:ins w:id="' + (id++) + '"' + meta + '>' + docxRun(seg.text, 'ins') + '</w:ins>';
+                    } else if (seg.type === 'del') {
+                        inner += '<w:del w:id="' + (id++) + '"' + meta + '>' + docxRun(seg.text, 'del') + '</w:del>';
+                    } else {
+                        inner += docxRun(seg.text, 'eq');
+                    }
+                });
+
+                body += '<w:p>' + pPr + inner + '</w:p>';
+            });
+
+            return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+                '<w:body>' + body +
+                '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+                '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="720" w:footer="720" w:gutter="0"/>' +
+                '</w:sectPr></w:body></w:document>';
+        }
+
+        function exportAsDocx() {
+            if (!isResultReady()) return;
+            if (typeof JSZip === 'undefined') {
+                alert('載入唔到 JSZip（產生 .docx 需要用到），請檢查網絡連線再試一次。');
+                return;
+            }
+
+            const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+                '<Default Extension="xml" ContentType="application/xml"/>' +
+                '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+                '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
+                '</Types>';
+
+            const rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+                '</Relationships>';
+
+            const docRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+                '</Relationships>';
+
+            const styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+                '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+                '<w:docDefaults><w:rPrDefault><w:rPr>' +
+                '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="PMingLiU" w:cs="Times New Roman"/>' +
+                '<w:sz w:val="24"/><w:szCs w:val="24"/><w:lang w:val="en-US" w:eastAsia="zh-HK"/>' +
+                '</w:rPr></w:rPrDefault>' +
+                '<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault>' +
+                '</w:docDefaults>' +
+                '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>' +
+                '</w:styles>';
+
+            try {
+                const zip = new JSZip();
+                zip.file('[Content_Types].xml', contentTypes);
+                zip.folder('_rels').file('.rels', rootRels);
+                const word = zip.folder('word');
+                word.file('document.xml', buildDocumentXml(collectDiffLines()));
+                word.file('styles.xml', styles);
+                word.folder('_rels').file('document.xml.rels', docRels);
+
+                zip.generateAsync({
+                    type: 'blob',
+                    compression: 'DEFLATE',
+                    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                }).then((blob) => {
+                    downloadBlob(blob, '對比結果_' + exportTimestamp() + '.docx');
+                }).catch((err) => {
+                    console.error(err);
+                    alert('產生 .docx 時發生錯誤，請再試一次。');
+                });
+            } catch (err) {
+                console.error(err);
+                alert('產生 .docx 時發生錯誤，請再試一次。');
+            }
         }
 
         /* ===== 跳轉功能（keyboard + swipe） ===== */
