@@ -83,6 +83,24 @@
         .copy-btn.copied {
             background-color: #27ae60;
         }
+        .paste-btn {
+            background-color: #e67e22;
+            color: white;
+            border: none;
+            padding: 6px 14px;
+            font-size: 13px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+            white-space: nowrap;
+        }
+        .paste-btn:hover {
+            background-color: #ca6f1e;
+        }
+        .paste-btn.pasted {
+            background-color: #27ae60;
+        }
         .file-name {
             font-size: 12px;
             color: #7f8c8d;
@@ -302,6 +320,7 @@
             <div class="label-row">
                 <label for="boxA">Text Box A (Original 原文):</label>
                 <div class="label-btn-group">
+                    <button type="button" class="paste-btn" onclick="pasteIntoBox('boxA', this)">📥 貼上</button>
                     <button type="button" class="copy-btn" onclick="copyBoxText('boxA', this)">📋 複製</button>
                     <button type="button" class="upload-btn" onclick="document.getElementById('fileA').click()">📂 上載檔案</button>
                 </div>
@@ -314,6 +333,7 @@
             <div class="label-row">
                 <label for="boxB">Text Box B (Revised 修改版):</label>
                 <div class="label-btn-group">
+                    <button type="button" class="paste-btn" onclick="pasteIntoBox('boxB', this)">📥 貼上</button>
                     <button type="button" class="copy-btn" onclick="copyBoxText('boxB', this)">📋 複製</button>
                     <button type="button" class="upload-btn" onclick="document.getElementById('fileB').click()">📂 上載檔案</button>
                 </div>
@@ -343,6 +363,54 @@
     <div id="boxC"></div>
 
     <script>
+        /* ===== 貼上功能：一撳就將剪貼簿嘅文字貼入對應嘅 text box ===== */
+        function pasteIntoBox(boxId, btn) {
+            const ta = document.getElementById(boxId);
+            const fileNameEl = document.getElementById(boxId === 'boxA' ? 'fileNameA' : 'fileNameB');
+
+            // 貼上成功後喺個掣度顯示提示，1.5 秒後還原
+            const showDone = () => {
+                if (!btn) return;
+                if (btn.dataset.origLabel === undefined) {
+                    btn.dataset.origLabel = btn.textContent;
+                }
+                btn.textContent = '✔ 已貼上';
+                btn.classList.add('pasted');
+                clearTimeout(btn._pasteTimer);
+                btn._pasteTimer = setTimeout(() => {
+                    btn.textContent = btn.dataset.origLabel;
+                    btn.classList.remove('pasted');
+                }, 1500);
+            };
+
+            const applyText = (text) => {
+                if (!text) {
+                    alert('剪貼簿入面冇文字，冇嘢可以貼上。');
+                    return;
+                }
+                if (ta.value && !confirm('呢個 Text Box 已經有內容，貼上會覆蓋晒佢。要繼續？')) {
+                    return;
+                }
+                ta.value = text;
+                if (fileNameEl) fileNameEl.textContent = '';
+                ta.scrollTop = 0;
+                showDone();
+            };
+
+            // 手動貼上（後備）：喺 file:// 或者瀏覽器唔畀讀剪貼簿嗰陣用
+            const manualPaste = () => {
+                alert('瀏覽器唔畀直接讀取剪貼簿。\n撳「確定」之後，個 Text Box 會自動 focus，請直接撳 Ctrl + V（Mac 用 ⌘ + V）貼上。');
+                ta.focus();
+                ta.select();
+            };
+
+            if (navigator.clipboard && navigator.clipboard.readText && window.isSecureContext) {
+                navigator.clipboard.readText().then(applyText).catch(manualPaste);
+            } else {
+                manualPaste();
+            }
+        }
+
         /* ===== 複製功能：一撳就將成個 text box 嘅文字複製去剪貼簿 ===== */
         function copyBoxText(boxId, btn) {
             const ta = document.getElementById(boxId);
