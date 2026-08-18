@@ -174,7 +174,6 @@
             font-size: 15px;
             line-height: 1.8;
             box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-            counter-reset: line;
         }
 
         /* 每一行：左邊行號 + 右邊內容 */
@@ -183,9 +182,9 @@
             min-height: 1.8em;
         }
         .line::before {
-            counter-increment: line;
-            content: counter(line);
-            flex: 0 0 3em;
+            content: attr(data-line); /* 用原文行號，唔會因為摺埋咗其他行而重新數過 */
+            flex: 0 0 auto;
+            min-width: 3.5em;
             text-align: right;
             padding-right: 10px;
             margin-right: 12px;
@@ -201,6 +200,45 @@
             min-width: 0;
             white-space: pre-wrap; /* 保留空格同換行符號 */
             word-break: break-word;
+        }
+
+        /* 摺埋咗嘅（冇改動）行 */
+        .gap {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 6px 0 6px 3.5em;
+            padding: 4px 12px;
+            background: repeating-linear-gradient(135deg, #f7f9fa, #f7f9fa 8px, #eef2f4 8px, #eef2f4 16px);
+            border: 1px dashed #cbd5d8;
+            border-radius: 5px;
+            color: #7f8c8d;
+            font-size: 12.5px;
+            font-family: Consolas, Menlo, monospace;
+            cursor: pointer;
+            user-select: none;
+        }
+        .gap:hover {
+            background: #eaf4fc;
+            border-color: #3498db;
+            color: #2471a3;
+        }
+
+        /* 檢視模式切換掣 */
+        .view-btn {
+            background-color: #34495e;
+            color: white;
+            border: none;
+            padding: 6px 14px;
+            font-size: 13px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+            white-space: nowrap;
+        }
+        .view-btn:hover {
+            background-color: #2c3e50;
         }
 
         /* Drag & Drop 提示效果 */
@@ -347,7 +385,8 @@
     <div class="btn-container">
         <button id="compareBtn" onclick="performComparison()">比較</button>
         <p id="instruction">提示：在下方的 Text Box C 中，<strong>點擊</strong>綠色底線文字以接受新增，<strong>點擊</strong>紅色刪除線文字以接受刪除。<br>
-        用 <strong>鍵盤 ← / →</strong> 或者喺手機上 <strong>左右 swipe</strong>，可以跳去上一個 / 下一個 change。</p>
+        用 <strong>鍵盤 ← / →</strong> 或者喺手機上 <strong>左右 swipe</strong>，可以跳去上一個 / 下一個 change。<br>
+        預設只顯示有改動嘅行同前後各一行；撳虛線嗰條摺疊列可以展開嗰一段，撳「顯示全部行」可以睇晒全文。行號永遠係原文行號。</p>
     </div>
 
     <div id="navStatus"><span id="navStatusText"></span></div>
@@ -355,6 +394,7 @@
     <div class="label-row" id="boxCHeader">
         <label for="boxC" id="labelC">Text Box C (對比結果 - 可點擊以 Accept Changes):</label>
         <div class="label-btn-group">
+            <button type="button" class="view-btn" id="viewToggleBtn" onclick="toggleLineView()">👁 顯示全部行</button>
             <button type="button" class="export-btn html" onclick="exportAsHtml()">🌐 匯出 HTML</button>
             <button type="button" class="export-btn pdf" onclick="exportAsPdf()">📄 匯出 PDF</button>
             <button type="button" class="export-btn docx" onclick="exportAsDocx()">📝 匯出 DOCX</button>
@@ -770,8 +810,29 @@
             document.getElementById('boxB').value = t2sConverter(textA);
         }
 
-        /* ===== 比較功能 ===== */
-        let currentChangeIndex = -1; // 目前跳轉到嘅 change（-1 = 未開始）
+        /* ==========================================================
+           比較功能
+           ----------------------------------------------------------
+           資料模型（diffModel）先係唯一嘅真相來源，畫面只係佢嘅一個
+           投影。咁樣先做得到「只畫有改動嗰幾行」而唔影響 accept、
+           跳轉、匯出等功能——冇顯示嘅行根本冇 DOM node，慳返記憶體。
+
+           每一行：{ no, mergeUp, segs }
+             no      = 原文行號，一經定咗就唔會變（摺埋行都唔會重新數過）
+             mergeUp = 上一行行尾嘅換行被刪除，accept 之後要合併返上去
+             segs    = [{ t:'eq'|'add'|'del', text, cid, marker }]
+           ========================================================== */
+
+        let diffModel = null;        // { lines: [...] }
+        let showAllLines = false;    // false = 只顯示改動附近；true = 顯示全部
+        let expandedLines = null;    // 用戶手動展開嘅行號（Set of no）
+        let currentChangeCid = null; // 目前跳轉到嘅 change（null = 未開始）
+
+        const CONTEXT_RADIUS = 1;    // 改動行前後各顯示幾多行
+
+        function escapeHtml(t) {
+            return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
 
         function performComparison() {
             const textA = document.getElementById('boxA').value;
@@ -788,107 +849,216 @@
             // 使用 jsdiff 進行字詞級別的對比 (diffWords)
             const diff = Diff.diffWords(textA, textB);
 
-            // 建立逐行結構嚟顯示 Tracked Changes（每行左邊有行號）
-            // 一個 change 如果跨行，會斬開做幾個 fragment，但共用同一個 data-cid，
-            // 撳其中一忽就會成個 change 一齊 accept
+            // 建立逐行結構。一個 change 如果跨行，會斬開做幾個 fragment，
+            // 但共用同一個 cid，撳其中一忽就會成個 change 一齊 accept。
             let cid = 0;
             const lines = [];
-            let cur = { mergeUp: null, html: '' };
-            const escapeHtml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            let cur = { no: 1, mergeUp: null, segs: [] };
 
             diff.forEach((part) => {
-                const cls = part.added ? 'diff-added' : (part.removed ? 'diff-removed' : null);
-                const action = part.added ? 'add' : 'remove';
-                const myCid = cls ? cid++ : null;
-                const segs = part.value.split('\n');
+                const type = part.added ? 'add' : (part.removed ? 'del' : 'eq');
+                const myCid = type === 'eq' ? null : cid++;
+                const pieces = part.value.split('\n');
 
-                segs.forEach((seg, i) => {
+                pieces.forEach((piece, i) => {
                     if (i > 0) {
                         // 呢個換行符號本身係 change 嘅一部分
-                        if (cls === 'diff-removed') {
-                            // 被刪除嘅換行：加個 ¶ 標記俾人撳，下一行標記住「接受刪除後要合併返上一行」
-                            cur.html += `<span class="${cls}" data-cid="${myCid}" onclick="acceptChange(this, 'remove')"><span class="newline-marker">¶</span></span>`;
+                        if (type === 'del') {
+                            // 被刪除嘅換行：加個 ¶ 標記俾人撳，下一行標記住「accept 後要合併返上一行」
+                            cur.segs.push({ t: 'del', text: '\n', cid: myCid, marker: true });
                             lines.push(cur);
-                            cur = { mergeUp: myCid, html: '' };
-                        } else if (cls === 'diff-added') {
-                            // 新增嘅換行：加個 ¶ 標記（accept 時淨係移除個標記，保留換行）
-                            cur.html += `<span class="${cls}" data-cid="${myCid}" data-marker="1" onclick="acceptChange(this, 'add')"><span class="newline-marker">¶</span></span>`;
+                            cur = { no: lines.length + 1, mergeUp: myCid, segs: [] };
+                        } else if (type === 'add') {
+                            // 新增嘅換行：加個 ¶ 標記（accept 時淨係移除個標記，換行本身保留）
+                            cur.segs.push({ t: 'add', text: '\n', cid: myCid, marker: true });
                             lines.push(cur);
-                            cur = { mergeUp: null, html: '' };
+                            cur = { no: lines.length + 1, mergeUp: null, segs: [] };
                         } else {
                             lines.push(cur);
-                            cur = { mergeUp: null, html: '' };
+                            cur = { no: lines.length + 1, mergeUp: null, segs: [] };
                         }
                     }
-                    if (seg.length > 0) {
-                        const safe = escapeHtml(seg);
-                        if (cls) {
-                            cur.html += `<span class="${cls}" data-cid="${myCid}" onclick="acceptChange(this, '${action}')">${safe}</span>`;
-                        } else {
-                            cur.html += safe;
-                        }
+                    if (piece.length > 0) {
+                        cur.segs.push({ t: type, text: piece, cid: myCid, marker: false });
                     }
                 });
             });
             lines.push(cur);
 
-            let displayHtml = '';
-            lines.forEach((line) => {
-                const mergeAttr = line.mergeUp !== null ? ` data-merge-up="${line.mergeUp}"` : '';
-                displayHtml += `<div class="line"${mergeAttr}><span class="line-content">${line.html}</span></div>`;
-            });
+            diffModel = { lines: lines };
+            expandedLines = new Set();
+            currentChangeCid = null;
 
-            boxC.innerHTML = displayHtml;
             boxC.style.display = 'block';
             boxCHeader.style.display = 'flex';
             instruction.style.display = 'block';
 
-            // 重設跳轉狀態
-            currentChangeIndex = -1;
+            renderDiff();
+        }
+
+        /* ---------- 畫面渲染 ---------- */
+
+        function lineHasChange(line) {
+            for (let i = 0; i < line.segs.length; i++) {
+                if (line.segs[i].t !== 'eq') return true;
+            }
+            return false;
+        }
+
+        // 一行嘅內容 HTML。clickable = false 就唔加 onclick（匯出時用）
+        function lineInnerHtml(line, clickable) {
+            let html = '';
+            line.segs.forEach((seg) => {
+                if (seg.t === 'eq') {
+                    html += escapeHtml(seg.text);
+                    return;
+                }
+                const cls = seg.t === 'add' ? 'diff-added' : 'diff-removed';
+                const action = seg.t === 'add' ? 'add' : 'remove';
+                const markerAttr = (seg.marker && seg.t === 'add') ? ' data-marker="1"' : '';
+                const clickAttr = clickable ? ` onclick="acceptChange(this, '${action}')"` : '';
+                const body = seg.marker ? '<span class="newline-marker">¶</span>' : escapeHtml(seg.text);
+                html += `<span class="${cls}" data-cid="${seg.cid}"${markerAttr}${clickAttr}>${body}</span>`;
+            });
+            return html;
+        }
+
+        function lineHtml(line, clickable) {
+            const mergeAttr = line.mergeUp !== null ? ` data-merge-up="${line.mergeUp}"` : '';
+            return `<div class="line" data-line="${line.no}"${mergeAttr}>` +
+                   `<span class="line-content">${lineInnerHtml(line, clickable)}</span></div>`;
+        }
+
+        // 決定邊幾行要畫出嚟：有改動嘅行 + 前後各 CONTEXT_RADIUS 行 + 用戶展開咗嘅行
+        function computeVisibleFlags() {
+            const lines = diffModel.lines;
+            const visible = new Array(lines.length).fill(false);
+
+            if (showAllLines) return visible.fill(true);
+
+            for (let i = 0; i < lines.length; i++) {
+                if (lineHasChange(lines[i])) {
+                    for (let j = Math.max(0, i - CONTEXT_RADIUS);
+                         j <= Math.min(lines.length - 1, i + CONTEXT_RADIUS); j++) {
+                        visible[j] = true;
+                    }
+                }
+            }
+            if (expandedLines.size) {
+                for (let i = 0; i < lines.length; i++) {
+                    if (expandedLines.has(lines[i].no)) visible[i] = true;
+                }
+            }
+            return visible;
+        }
+
+        function renderDiff() {
+            const boxC = document.getElementById('boxC');
+            if (!diffModel) return;
+
+            const lines = diffModel.lines;
+            const visible = computeVisibleFlags();
+            const scrollY = window.scrollY;
+
+            let html = '';
+            let hiddenTotal = 0;
+            let i = 0;
+            while (i < lines.length) {
+                if (visible[i]) {
+                    html += lineHtml(lines[i], true);
+                    i++;
+                    continue;
+                }
+                // 一段連續嘅、冇改動嘅行 → 摺埋做一條可以撳嘅摺疊列
+                const from = i;
+                while (i < lines.length && !visible[i]) i++;
+                const count = i - from;
+                hiddenTotal += count;
+                const firstNo = lines[from].no;
+                const lastNo = lines[i - 1].no;
+                const range = count === 1 ? `第 ${firstNo} 行` : `第 ${firstNo} – ${lastNo} 行`;
+                html += `<div class="gap" data-from="${firstNo}" data-to="${lastNo}" ` +
+                        `onclick="expandGap(this)" title="撳一下展開呢一段">` +
+                        `⋯ 摺埋咗 ${count} 行冇改動嘅內容（${range}）· 撳一下展開</div>`;
+            }
+
+            boxC.innerHTML = html;
+            diffModel.hiddenCount = hiddenTotal;
+
+            // 重新畫過之後，將高亮貼返落目前嗰個 change
+            if (currentChangeCid !== null) {
+                const els = boxC.querySelectorAll(`[data-cid="${currentChangeCid}"]`);
+                if (els.length) {
+                    els.forEach((el) => el.classList.add('diff-current'));
+                } else {
+                    currentChangeCid = null; // 已經被 accept 咗
+                }
+            }
+
+            document.getElementById('viewToggleBtn').textContent =
+                showAllLines ? '🔍 只顯示改動' : '👁 顯示全部行';
+
+            window.scrollTo(0, scrollY);
             updateNavStatus();
         }
 
-        // Accept Changes 的核心邏輯（成個 change group 一齊處理）
-        function acceptChange(element, action) {
-            const cidValue = element.getAttribute('data-cid');
-            const group = Array.from(document.querySelectorAll(`#boxC [data-cid="${cidValue}"]`));
-
-            // 如果接受咗嘅係目前高亮嗰個，或者係佢之前嘅 change，要調整 index
-            const changes = getChangeList();
-            const removedIndex = changes.findIndex(g => g.cid === cidValue);
-            if (removedIndex !== -1 && removedIndex <= currentChangeIndex) {
-                currentChangeIndex--;
+        function toggleLineView() {
+            if (!diffModel) {
+                alert('請先撳「比較」產生對比結果。');
+                return;
             }
+            showAllLines = !showAllLines;
+            if (showAllLines) expandedLines.clear(); // 返去摺疊模式時重新計過
+            renderDiff();
+        }
+
+        function expandGap(el) {
+            if (!diffModel) return;
+            const from = parseInt(el.getAttribute('data-from'), 10);
+            const to = parseInt(el.getAttribute('data-to'), 10);
+            for (let n = from; n <= to; n++) expandedLines.add(n);
+            renderDiff();
+        }
+
+        /* ---------- Accept Changes（改資料模型，再重畫） ---------- */
+
+        function acceptChange(element, action) {
+            if (!diffModel) return;
+            const cidValue = parseInt(element.getAttribute('data-cid'), 10);
+            const lines = diffModel.lines;
+
+            // 將而家睇緊嘅行釘住，咁 accept 咗之後個 view 唔會突然喺你眼前縮埋
+            const visibleNow = computeVisibleFlags();
+            lines.forEach((line, i) => { if (visibleNow[i]) expandedLines.add(line.no); });
 
             if (action === 'add') {
-                group.forEach((el) => {
-                    if (el.hasAttribute('data-marker')) {
-                        // 換行標記 ¶：純顯示用，accept 時直接移除（換行本身由行結構保留）
-                        el.remove();
-                    } else {
-                        // 接受新增：移除 span 標籤，保留裡面的文字
-                        const textNode = document.createTextNode(el.textContent);
-                        el.parentNode.replaceChild(textNode, el);
-                    }
+                // 接受新增：¶ 標記直接消失（換行由行結構保留），其餘變返普通文字
+                lines.forEach((line) => {
+                    line.segs = line.segs.filter((s) => !(s.cid === cidValue && s.marker));
+                    line.segs.forEach((s) => {
+                        if (s.cid === cidValue) { s.t = 'eq'; s.cid = null; }
+                    });
                 });
             } else if (action === 'remove') {
-                // 接受刪除：將所有 fragment 從畫面上移除
-                group.forEach((el) => el.remove());
-                // 如果刪除嘅內容包括換行符號，將受影響嘅行合併返上一行（行號會自動更新）
-                document.querySelectorAll(`#boxC .line[data-merge-up="${cidValue}"]`).forEach((line) => {
-                    const prev = line.previousElementSibling;
-                    if (prev && prev.classList.contains('line')) {
-                        const prevContent = prev.querySelector('.line-content');
-                        const content = line.querySelector('.line-content');
-                        while (content.firstChild) prevContent.appendChild(content.firstChild);
-                        line.remove();
-                    } else {
-                        line.removeAttribute('data-merge-up');
-                    }
+                // 接受刪除：所有 fragment 消失
+                lines.forEach((line) => {
+                    line.segs = line.segs.filter((s) => s.cid !== cidValue);
                 });
+                // 如果刪除嘅內容包住換行符號，就將受影響嗰行合併返上一行
+                for (let i = 0; i < lines.length; i++) {
+                    if (lines[i].mergeUp !== cidValue) continue;
+                    if (i > 0) {
+                        lines[i - 1].segs = lines[i - 1].segs.concat(lines[i].segs);
+                        lines.splice(i, 1); // 合併之後行號會出現斷層，因為行號係原文行號
+                        i--;
+                    } else {
+                        lines[i].mergeUp = null;
+                    }
+                }
             }
 
-            updateNavStatus();
+            if (currentChangeCid === cidValue) currentChangeCid = null;
+            renderDiff();
         }
 
         /* ==========================================================
@@ -901,7 +1071,7 @@
 
         function isResultReady() {
             const boxC = document.getElementById('boxC');
-            if (!boxC || boxC.style.display !== 'block') {
+            if (!boxC || boxC.style.display !== 'block' || !diffModel) {
                 alert('請先撳「比較」產生對比結果，之後先可以匯出。');
                 return false;
             }
@@ -934,11 +1104,14 @@
             }, 1000);
         }
 
-        // 取一份乾淨嘅 Box C 副本：去咗 onclick 同高亮，但保留 data-cid / data-marker / data-merge-up
+        // 匯出用嘅完整結果：由資料模型重建「全部」行（包括畫面上摺埋咗嗰啲），
+        // 而且冇 onclick 同高亮。data-line / data-cid / data-marker / data-merge-up 一律保留。
         function getCleanResultClone() {
-            const clone = document.getElementById('boxC').cloneNode(true);
-            clone.querySelectorAll('.diff-current').forEach((el) => el.classList.remove('diff-current'));
-            clone.querySelectorAll('[onclick]').forEach((el) => el.removeAttribute('onclick'));
+            const clone = document.createElement('div');
+            if (!diffModel) return clone;
+            let html = '';
+            diffModel.lines.forEach((line) => { html += lineHtml(line, false); });
+            clone.innerHTML = html;
             return clone;
         }
 
@@ -1050,9 +1223,9 @@
                 '.hint { font-size: 13px; color: #7f8c8d; text-align: center; margin-bottom: 12px; }',
                 '.status { text-align: center; margin-bottom: 12px; }',
                 '.status span { display: inline-block; background-color: #2c3e50; color: #fff; font-size: 13px; padding: 6px 16px; border-radius: 20px; }',
-                '.diff-body { background-color: #fff; padding: 20px 20px 20px 0; border: 1px solid #ccc; border-radius: 6px; min-height: 100px; font-size: 15px; line-height: 1.8; box-shadow: 0 4px 6px rgba(0,0,0,0.05); counter-reset: line; }',
+                '.diff-body { background-color: #fff; padding: 20px 20px 20px 0; border: 1px solid #ccc; border-radius: 6px; min-height: 100px; font-size: 15px; line-height: 1.8; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }',
                 '.line { display: flex; min-height: 1.8em; }',
-                '.line::before { counter-increment: line; content: counter(line); flex: 0 0 3em; text-align: right; padding-right: 10px; margin-right: 12px; color: #95a5a6; font-size: 12px; line-height: 2.2; font-family: Consolas, Menlo, monospace; border-right: 1px solid #e8e8e8; user-select: none; }',
+                '.line::before { content: attr(data-line); flex: 0 0 auto; min-width: 3.5em; text-align: right; padding-right: 10px; margin-right: 12px; color: #95a5a6; font-size: 12px; line-height: 2.2; font-family: Consolas, Menlo, monospace; border-right: 1px solid #e8e8e8; user-select: none; }',
                 '.line-content { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }',
                 '.newline-marker { opacity: 0.55; font-size: 12px; }',
                 '.diff-added { background-color: #e6ffed; color: #22863a; text-decoration: underline; cursor: pointer; padding: 2px; border-radius: 3px; }',
@@ -1107,7 +1280,7 @@
                 '.notice button { background: #c0392b; color: #fff; border: none; padding: 6px 14px; border-radius: 5px; font-size: 13px; font-weight: bold; cursor: pointer; margin-left: 6px; }',
                 '.diff-body { font-size: 14px; line-height: 1.8; }',
                 '.line { display: flex; page-break-inside: avoid; break-inside: avoid; }',
-                '.line-no { flex: 0 0 3em; text-align: right; padding-right: 10px; margin-right: 12px; color: #95a5a6; font-size: 11px; line-height: 2.3; font-family: Consolas, Menlo, monospace; border-right: 1px solid #e8e8e8; }',
+                '.line-no { flex: 0 0 auto; min-width: 3.5em; text-align: right; padding-right: 10px; margin-right: 12px; color: #95a5a6; font-size: 11px; line-height: 2.3; font-family: Consolas, Menlo, monospace; border-right: 1px solid #e8e8e8; }',
                 '.line-content { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }',
                 '.newline-marker { opacity: 0.55; font-size: 11px; }',
                 '.diff-added { background-color: #e6ffed; color: #22863a; text-decoration: underline; padding: 1px 2px; border-radius: 3px; }',
@@ -1119,12 +1292,12 @@
         function exportAsPdf() {
             if (!isResultReady()) return;
 
-            // 行號改用真文字（唔靠 CSS counter），確保列印引擎一定畫得出
+            // 行號改用真文字（唔靠 ::before），確保列印引擎一定畫得出；數字用返原文行號
             const clone = getCleanResultClone();
-            clone.querySelectorAll('.line').forEach((line, i) => {
+            clone.querySelectorAll('.line').forEach((line) => {
                 const no = document.createElement('span');
                 no.className = 'line-no';
-                no.textContent = String(i + 1);
+                no.textContent = line.getAttribute('data-line') || '';
                 line.insertBefore(no, line.firstChild);
             });
 
@@ -1156,40 +1329,26 @@
 
         /* ---------- 3) 匯出 DOCX（真正嘅 Word Track Changes） ---------- */
 
-        // 將 Box C 目前嘅狀態拆返做「一行行 + 每行嘅片段」
+        // 將對比結果目前嘅狀態拆返做「一行行 + 每行嘅片段」（由資料模型讀，
+        // 所以畫面上摺埋咗嘅行一樣會匯出）
         // paraMark: 'ins' = 呢一行嘅段落標記係新增；'del' = 段落標記被刪除（accept 之後會同下一行合併）
         function collectDiffLines() {
-            const result = [];
-            document.querySelectorAll('#boxC .line').forEach((lineEl) => {
-                const content = lineEl.querySelector('.line-content');
+            if (!diffModel) return [];
+            return diffModel.lines.map((line) => {
                 const segs = [];
                 let paraMark = null;
-                if (content) {
-                    Array.prototype.forEach.call(content.childNodes, (node) => {
-                        if (node.nodeType === 3) { // 文字節點
-                            if (node.nodeValue) {
-                                segs.push({ type: 'eq', text: node.nodeValue });
-                                paraMark = null;
-                            }
-                            return;
-                        }
-                        if (node.nodeType !== 1) return;
-                        const isAdded = node.classList.contains('diff-added');
-                        const isRemoved = node.classList.contains('diff-removed');
-                        // ¶ 標記：代表段落標記本身嘅變更，唔可以當普通文字
-                        if (node.querySelector && node.querySelector('.newline-marker')) {
-                            paraMark = isAdded ? 'ins' : (isRemoved ? 'del' : null);
-                            return;
-                        }
-                        const text = node.textContent;
-                        if (!text) return;
-                        segs.push({ type: isAdded ? 'ins' : (isRemoved ? 'del' : 'eq'), text: text });
-                        paraMark = null;
-                    });
-                }
-                result.push({ segs: segs, paraMark: paraMark });
+                line.segs.forEach((s) => {
+                    // ¶ 標記：代表段落標記本身嘅變更，唔可以當普通文字
+                    if (s.marker) {
+                        paraMark = s.t === 'add' ? 'ins' : (s.t === 'del' ? 'del' : null);
+                        return;
+                    }
+                    if (!s.text) return;
+                    segs.push({ type: s.t === 'add' ? 'ins' : (s.t === 'del' ? 'del' : 'eq'), text: s.text });
+                    paraMark = null;
+                });
+                return { segs: segs, paraMark: paraMark };
             });
-            return result;
         }
 
         function xmlEscape(s) {
@@ -1321,7 +1480,7 @@
             const groups = [];
             const seenCids = new Set();
             spans.forEach((sp) => {
-                const c = sp.getAttribute('data-cid');
+                const c = parseInt(sp.getAttribute('data-cid'), 10);
                 if (!seenCids.has(c)) {
                     seenCids.add(c);
                     groups.push({ cid: c, first: sp });
@@ -1334,21 +1493,19 @@
             const changes = getChangeList();
             if (changes.length === 0) return;
 
+            // 用 cid 而唔係 index 記住位置，咁樣重畫過畫面之後都仲跟得住
+            let idx = changes.findIndex(c => c.cid === currentChangeCid);
             if (direction === 'next') {
-                currentChangeIndex++;
-                if (currentChangeIndex >= changes.length) {
-                    currentChangeIndex = 0; // 到咗最尾就返去第一個
-                }
+                idx = (idx + 1) % changes.length;              // idx = -1 時會由第一個開始
             } else {
-                currentChangeIndex--;
-                if (currentChangeIndex < 0) {
-                    currentChangeIndex = changes.length - 1; // 喺第一個再向前就跳去最尾
-                }
+                idx = (idx <= 0 ? changes.length : idx) - 1;   // 喺第一個再向前就跳去最尾
             }
+
+            const target = changes[idx];
+            currentChangeCid = target.cid;
 
             // 移除所有舊高亮，將目前 change group 嘅所有 fragments 一齊高亮
             document.querySelectorAll('#boxC .diff-current').forEach(el => el.classList.remove('diff-current'));
-            const target = changes[currentChangeIndex];
             document.querySelectorAll(`#boxC [data-cid="${target.cid}"]`).forEach(el => el.classList.add('diff-current'));
 
             // 畫面直接跳去嗰個 change 嘅位置（置中顯示）
@@ -1368,15 +1525,19 @@
                 return;
             }
 
+            const hidden = (diffModel && diffModel.hiddenCount) ? diffModel.hiddenCount : 0;
+            const foldNote = hidden ? '　·　摺埋咗 ' + hidden + ' 行' : '';
+
             navStatus.style.display = 'block';
             if (changes.length === 0) {
-                navStatusText.textContent = '✔ 冇（剩餘嘅）changes';
+                navStatusText.textContent = '✔ 冇（剩餘嘅）changes' + foldNote;
                 return;
             }
-            if (currentChangeIndex >= 0 && currentChangeIndex < changes.length) {
-                navStatusText.textContent = 'Change ' + (currentChangeIndex + 1) + ' / ' + changes.length;
+            const idx = changes.findIndex(c => c.cid === currentChangeCid);
+            if (idx >= 0) {
+                navStatusText.textContent = 'Change ' + (idx + 1) + ' / ' + changes.length + foldNote;
             } else {
-                navStatusText.textContent = '共 ' + changes.length + ' 個 changes（撳 ← / → 或 swipe 跳轉）';
+                navStatusText.textContent = '共 ' + changes.length + ' 個 changes（撳 ← / → 或 swipe 跳轉）' + foldNote;
             }
         }
 
