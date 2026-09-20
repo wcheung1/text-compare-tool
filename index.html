@@ -342,6 +342,39 @@
             display: none;
             text-align: center;
         }
+
+        /* 複製提示（accept change 之後彈一陣） */
+        #toast {
+            position: fixed;
+            left: 50%;
+            bottom: 28px;
+            transform: translate(-50%, 12px);
+            max-width: min(92vw, 560px);
+            background-color: #2c3e50;
+            color: #fff;
+            font-size: 13.5px;
+            line-height: 1.5;
+            padding: 10px 18px;
+            border-radius: 22px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+            opacity: 0;
+            pointer-events: none;
+            visibility: hidden;
+            transition: opacity 0.2s, transform 0.2s;
+            z-index: 100;
+            word-break: break-word;
+        }
+        #toast.show {
+            opacity: 1;
+            visibility: visible;
+            transform: translate(-50%, 0);
+        }
+        #toast.warn {
+            background-color: #b9770e;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            #toast { transition: none; }
+        }
     </style>
 </head>
 <body>
@@ -384,7 +417,7 @@
 
     <div class="btn-container">
         <button id="compareBtn" onclick="performComparison()">比較</button>
-        <p id="instruction">提示：在下方的 Text Box C 中，<strong>點擊</strong>綠色底線文字以接受新增，<strong>點擊</strong>紅色刪除線文字以接受刪除。<br>
+        <p id="instruction">提示：在下方的 Text Box C 中，<strong>點擊</strong>綠色底線文字以接受新增，<strong>點擊</strong>紅色刪除線文字以接受刪除。點擊嘅同時，嗰段文字會一齊放入剪貼簿，可以即刻貼去第二度。<br>
         用 <strong>鍵盤 ← / →</strong> 或者喺手機上 <strong>左右 swipe</strong>，可以跳去上一個 / 下一個 change。<br>
         預設只顯示有改動嘅行同前後各一行；撳虛線嗰條摺疊列可以展開嗰一段，撳「顯示全部行」可以睇晒全文。行號永遠係原文行號。</p>
     </div>
@@ -401,6 +434,8 @@
         </div>
     </div>
     <div id="boxC"></div>
+
+    <div id="toast" role="status" aria-live="polite"></div>
 
     <script>
         /* ===== 貼上功能：一撳就將剪貼簿嘅文字貼入對應嘅 text box ===== */
@@ -1022,10 +1057,82 @@
 
         /* ---------- Accept Changes（改資料模型，再重畫） ---------- */
 
+        // 將一個 change group（可能跨行）嘅原文拼返出嚟。
+        // ¶ 標記本身代表一個換行符號，所以拼出嚟嘅文字同原文一模一樣。
+        function changeGroupText(cidValue) {
+            let text = '';
+            diffModel.lines.forEach((line) => {
+                line.segs.forEach((s) => {
+                    if (s.cid === cidValue) text += s.text;
+                });
+            });
+            return text;
+        }
+
+        // 舊方法：喺 file:// 或者唔准用 clipboard API 嗰陣照樣複製得到
+        function legacyCopyText(text) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-1000px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+
+            const sel = document.getSelection();
+            const prevRange = (sel && sel.rangeCount) ? sel.getRangeAt(0) : null;
+
+            ta.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+
+            document.body.removeChild(ta);
+            // 還原用戶原本揀緊嘅文字
+            if (sel && prevRange) { sel.removeAllRanges(); sel.addRange(prevRange); }
+            return ok;
+        }
+
+        function copyPlainText(text) {
+            if (!text) return Promise.resolve(false);
+            if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+                return navigator.clipboard.writeText(text)
+                    .then(() => true)
+                    .catch(() => legacyCopyText(text));
+            }
+            return Promise.resolve(legacyCopyText(text));
+        }
+
+        let toastTimer = null;
+        function showToast(message, tone) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'show' + (tone ? ' ' + tone : '');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => { toast.className = ''; }, 2200);
+        }
+
+        // 預覽俾 toast 用：太長就截短，換行轉做 ⏎ 免得成個 toast 谷爆
+        function previewText(text) {
+            const flat = text.replace(/\n/g, ' ⏎ ').replace(/\s+/g, ' ').trim();
+            if (!flat) return '（換行）';
+            return flat.length > 28 ? flat.slice(0, 28) + '…' : flat;
+        }
+
         function acceptChange(element, action) {
             if (!diffModel) return;
             const cidValue = parseInt(element.getAttribute('data-cid'), 10);
             const lines = diffModel.lines;
+
+            // 喺改動模型之前先攞晒呢個 change 嘅文字，順手放入剪貼簿
+            const groupText = changeGroupText(cidValue);
+            const label = action === 'add' ? '新增' : '刪除';
+            copyPlainText(groupText).then((ok) => {
+                if (ok) {
+                    showToast('✔ 已接受' + label + '，並複製咗：' + previewText(groupText));
+                } else {
+                    showToast('已接受' + label + '，但複製失敗（瀏覽器唔准讀寫剪貼簿）', 'warn');
+                }
+            });
 
             // 將而家睇緊嘅行釘住，咁 accept 咗之後個 view 唔會突然喺你眼前縮埋
             const visibleNow = computeVisibleFlags();
@@ -1139,12 +1246,68 @@
         statusText.textContent = (n === 0) ? '✔ 冇（剩餘嘅）changes' : ('剩餘 ' + n + ' 個 changes');
     }
 
+    // 將一個 change group（可能跨行）嘅原文拼返出嚟；¶ 標記代表一個換行符號
+    function groupText(cid) {
+        var nodes = root.querySelectorAll('[data-cid="' + cid + '"]');
+        var t = '';
+        for (var i = 0; i < nodes.length; i++) {
+            t += nodes[i].querySelector('.newline-marker') ? '\\n' : nodes[i].textContent;
+        }
+        return t;
+    }
+
+    function legacyCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+        document.body.removeChild(ta);
+        return ok;
+    }
+
+    var toastTimer = null;
+    function toast(msg, warn) {
+        var box = document.getElementById('toast');
+        box.textContent = msg;
+        box.className = warn ? 'show warn' : 'show';
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { box.className = ''; }, 2200);
+    }
+
+    function preview(text) {
+        var flat = text.replace(/\\n/g, ' ⏎ ').replace(/\\s+/g, ' ').replace(/^ | $/g, '');
+        if (!flat) { return '（換行）'; }
+        return flat.length > 28 ? flat.slice(0, 28) + '…' : flat;
+    }
+
+    function copyAndTell(text, label) {
+        var done = function (ok) {
+            toast(ok ? ('✔ 已接受' + label + '，並複製咗：' + preview(text))
+                     : ('已接受' + label + '，但複製失敗（瀏覽器唔准讀寫剪貼簿）'), !ok);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(function () { done(true); },
+                                                     function () { done(legacyCopy(text)); });
+        } else {
+            done(legacyCopy(text));
+        }
+    }
+
     // 同原本工具一模一樣嘅 accept 邏輯（成個 change group 一齊處理）
-    function acceptElement(el) {
+    // copy = true 先會放入剪貼簿（「全部接受」唔會，否則剪貼簿冇意義）
+    function acceptElement(el, copy) {
         var isAdd = el.className.indexOf('diff-added') !== -1;
         var cid = el.getAttribute('data-cid');
         var group = root.querySelectorAll('[data-cid="' + cid + '"]');
         var i;
+
+        if (copy) { copyAndTell(groupText(cid), isAdd ? '新增' : '刪除'); }
 
         if (isAdd) {
             for (i = 0; i < group.length; i++) {
@@ -1181,7 +1344,7 @@
         while (t && t !== root) {
             if (t.className && typeof t.className === 'string' &&
                 (t.className.indexOf('diff-added') !== -1 || t.className.indexOf('diff-removed') !== -1)) {
-                acceptElement(t);
+                acceptElement(t, true);
                 return;
             }
             t = t.parentNode;
@@ -1192,7 +1355,7 @@
         var guard = 0;
         var el = root.querySelector('.diff-added, .diff-removed');
         while (el && guard++ < 200000) {
-            acceptElement(el);
+            acceptElement(el, false);
             el = root.querySelector('.diff-added, .diff-removed');
         }
     });
@@ -1230,6 +1393,9 @@
                 '.newline-marker { opacity: 0.55; font-size: 12px; }',
                 '.diff-added { background-color: #e6ffed; color: #22863a; text-decoration: underline; cursor: pointer; padding: 2px; border-radius: 3px; }',
                 '.diff-removed { background-color: #ffeef0; color: #cb2431; text-decoration: line-through; cursor: pointer; padding: 2px; border-radius: 3px; }',
+                '#toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 12px); max-width: min(92vw, 560px); background-color: #2c3e50; color: #fff; font-size: 13.5px; line-height: 1.5; padding: 10px 18px; border-radius: 22px; box-shadow: 0 4px 14px rgba(0,0,0,0.25); opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 100; word-break: break-word; }',
+                '#toast.show { opacity: 1; visibility: visible; transform: translate(-50%, 0); }',
+                '#toast.warn { background-color: #b9770e; }',
                 '.diff-added:hover::after { content: " (點擊接受新增)"; font-size: 12px; color: gray; text-decoration: none; }',
                 '.diff-removed:hover::after { content: " (點擊接受刪除)"; font-size: 12px; color: gray; text-decoration: none; }',
                 '@media print { body { background: #fff; max-width: none; padding: 0; } .toolbar, .hint, .status { display: none !important; } .diff-body { border: none; box-shadow: none; padding: 0; } .line { page-break-inside: avoid; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }'
@@ -1254,9 +1420,10 @@
                 '<button type="button" id="btnReset" class="btn-reset">↺ 還原</button>' +
                 '<button type="button" id="btnPrint" class="btn-print">🖨 列印 / 存為 PDF</button>' +
                 '</div>\n' +
-                '<div class="hint"><strong>點擊</strong>綠色底線文字 = 接受新增；<strong>點擊</strong>紅色刪除線文字 = 接受刪除。¶ 代表段落換行嘅變更。</div>\n' +
+                '<div class="hint"><strong>點擊</strong>綠色底線文字 = 接受新增；<strong>點擊</strong>紅色刪除線文字 = 接受刪除，點擊同時會將嗰段文字複製落剪貼簿。¶ 代表段落換行嘅變更。</div>\n' +
                 '<div class="status"><span id="statusText"></span></div>\n' +
                 '<div class="diff-body" id="diffRoot">' + inner + '</div>\n' +
+                '<div id="toast" role="status" aria-live="polite"></div>\n' +
                 '<script>' + EXPORT_HTML_SCRIPT + '<\/script>\n' +
                 '</body>\n</html>';
 
