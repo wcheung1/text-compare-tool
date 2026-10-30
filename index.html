@@ -8,6 +8,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.11.0/mammoth.browser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <!-- 簡 ➔ 繁 轉換規則：要同呢個 index.html 擺喺同一個 folder -->
+    <script src="s2t-rules.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -162,6 +164,18 @@
         .convert-options input {
             cursor: pointer;
             margin: 0;
+        }
+        .convert-options label:has(input:disabled) {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .rules-status {
+            margin-top: 6px;
+            font-size: 12px;
+            color: #95a5a6;
+        }
+        .rules-status.warn {
+            color: #b9770e;
         }
         button.convert-btn {
             background-color: #27ae60;
@@ -405,13 +419,14 @@
         <button type="button" class="convert-btn s2t" onclick="convertS2T()">簡 ➔ 繁（Text Box A → B）</button>
         <button type="button" class="convert-btn t2s" onclick="convertT2S()">繁 ➔ 簡（Text Box A → B）</button>
         <div class="convert-options">
-            <label title="OpenCC 嘅香港標準字形（説、温、户、羣）換返中文輸入法常用嘅寫法（說、溫、戶、群）">
-                <input type="checkbox" id="optCommonGlyph" checked> 用電腦常用字形（說 / 溫 / 戶 / 群）
+            <label title="「説、閲、税」呢類香港標準字形換做日常寫法「說、閱、稅」；「衞、温、户」等就保留香港標準字形。可以喺 s2t-rules.js 改。">
+                <input type="checkbox" id="optCommonGlyph" checked> 用日常字形（說 / 閱 / 稅 / 搵）
             </label>
-            <label title="簡體「系」轉完繁體多數仲係「系」，廣東話口語應該係「係」。「系統」「中文系」嗰類詞會保留。">
-                <input type="checkbox" id="optCantoneseXi" checked> 廣東話「系」➔「係」
+            <label title="系→係、嚇→吓、曬→晒、唔準→唔准 等廣東話用字。「系統」「嚇親」「曬太陽」嗰類詞會保留。轉普通話文章可以 uncheck。">
+                <input type="checkbox" id="optCantonese" checked> 廣東話用字（係 / 吓 / 晒 / 唔准）
             </label>
         </div>
+        <div id="rulesStatus" class="rules-status"></div>
     </div>
 
     <div class="container">
@@ -821,102 +836,153 @@
         }
 
         /* ==========================================================
-           簡繁轉換功能（使用 opencc-js）
+           簡繁轉換功能（OpenCC + s2t-rules.js）
            ----------------------------------------------------------
-           OpenCC 嘅 cn → hk 本身已經做咗詞組級別嘅一對多消歧，
-           但出嚟嘅字仲有兩類問題要喺本機修正：
-
-           1) 香港官方字形 vs 電腦常用字形
-              「hk」用香港教育局嘅標準字形（説、閲、温、戶 寫做 户、群 寫做 羣…），
-              呢啲字喺 Unicode 係另一個碼位，同中文輸入法／大部分網站用嘅寫法唔同，
-              貼出去成日會變豆腐字或者同人哋份文件唔一致。所以轉完之後換返常用寫法。
-
-           2) 廣東話嘅「系」
-              簡體「系」轉繁體之後好多時留低做「系」（例如「即系」「我系」），
-              廣東話口語十居其九係「係」。所以除咗「系統」「學系」嗰類真係用「系」
-              嘅詞之外，其餘一律改做「係」。
+           OpenCC cn → hk 之後，再用 s2t-rules.js 入面嘅規則修正。
+           規則全部擺喺嗰個檔，呢度只係規則引擎，加規則唔使改呢度。
            ========================================================== */
         let s2tConverter = null; // 簡 ➔ 繁（香港繁體）
         let t2sConverter = null; // 繁 ➔ 簡
 
-        /* ---- (1) 香港標準字形 ➔ 電腦常用字形 ---------------------- */
-        const HK_GLYPH_MAP = {
-            // 「兌」部件：香港標準寫做「兑」
-            '兑': '兌', '説': '說', '閲': '閱', '脱': '脫', '税': '稅', '鋭': '銳', '悦': '悅', '蜕': '蛻',
-            // 「𥁕」部件：香港標準寫做「昷」
-            '温': '溫', '愠': '慍', '氲': '氳', '醖': '醞', '藴': '蘊', '緼': '縕',
-            '煴': '熅', '榅': '榲', '腽': '膃', '輼': '轀', '蒀': '蒕', '鰛': '鰮',
-            // 其餘常見嘅香港字形
-            '户': '戶', '羣': '群', '衞': '衛', '啓': '啟', '敍': '敘', '卧': '臥',
-            '峯': '峰', '牀': '床', '葱': '蔥', '麪': '麵', '鈎': '鉤',
-            '揾': '搵', '枴': '柺', '皁': '皂', '嫺': '嫻', '媪': '媼', '繮': '韁',
-            '齶': '顎', '鮎': '鯰', '捝': '挩', '棁': '梲', '敚': '敓', '涚': '涗'
-        };
-        const HK_GLYPH_RE = new RegExp('[' + Object.keys(HK_GLYPH_MAP).join('') + ']', 'g');
+        // 讀入 s2t-rules.js，順手清走格式唔啱嘅規則（免得一條寫錯就成個轉換壞晒）
+        const S2T = (function loadS2TRules() {
+            const R = window.S2T_RULES;
+            if (!R || typeof R !== 'object') return null;
+
+            const skipped = [];
+            const glyphs = {};
+            Object.keys(R.glyphs || {}).forEach((k) => {
+                const v = R.glyphs[k];
+                // 字形一定要「一隻字 → 一隻字」，先可以喺比對嗰陣保持字數一樣
+                if (k.length === 1 && typeof v === 'string' && v.length === 1) glyphs[k] = v;
+                else skipped.push('glyphs: ' + k);
+            });
+
+            const pickChars = (arr, where) => (Array.isArray(arr) ? arr : []).filter((r) => {
+                const ok = r && typeof r.from === 'string' && r.from.length === 1 && typeof r.to === 'string';
+                if (!ok) skipped.push(where + '.chars: ' + JSON.stringify(r));
+                return ok;
+            }).map((r) => ({
+                from: r.from,
+                to: r.to,
+                keep: (Array.isArray(r.keep) ? r.keep : []).filter((w) => typeof w === 'string' && w.length)
+            }));
+
+            const pickPhrases = (arr, where) => (Array.isArray(arr) ? arr : []).filter((p) => {
+                const ok = Array.isArray(p) && typeof p[0] === 'string' && p[0].length > 0 &&
+                           typeof p[1] === 'string' && p[0] !== p[1];
+                if (!ok) skipped.push(where + '.phrases: ' + JSON.stringify(p));
+                return ok;
+            });
+
+            const g = R.general || {}, c = R.cantonese || {};
+            const out = {
+                glyphs: glyphs,
+                glyphRe: Object.keys(glyphs).length ? new RegExp('[' + Object.keys(glyphs).join('') + ']', 'g') : null,
+                general:   { chars: pickChars(g.chars, 'general'),   phrases: pickPhrases(g.phrases, 'general') },
+                cantonese: { chars: pickChars(c.chars, 'cantonese'), phrases: pickPhrases(c.phrases, 'cantonese') },
+                skipped: skipped
+            };
+            if (skipped.length) console.warn('s2t-rules.js：以下規則格式唔啱，已略過：', skipped);
+            return out;
+        })();
 
         function toCommonGlyphs(text) {
-            return text.replace(HK_GLYPH_RE, (c) => HK_GLYPH_MAP[c] || c);
+            if (!S2T || !S2T.glyphRe) return text;
+            return text.replace(S2T.glyphRe, (ch) => S2T.glyphs[ch] || ch);
         }
 
-        /* ---- (2) 廣東話「系」➔「係」 ------------------------------ */
-        // 呢啲詞真係用「系」，唔好改。只要個「系」落喺任何一個詞入面就保留。
-        const KEEP_XI = [
-            // 本身就係「系」嘅詞
-            '系統', '系列', '系數', '系譜', '系出', '系爭', '系所', '系友', '系辦', '系會', '系主任',
-            '體系', '學系', '語系', '派系', '星系', '太陽系', '銀河系', '水系', '山系', '河系',
-            '父系', '母系', '直系', '旁系', '嫡系', '菌系', '品系', '譜系', '世系', '家系', '族系',
-            '關係', '聯系', '維系', '系帶', '系泊',
-            // 學系（「中文系」嗰類，簡體轉完會淨低「系」）
-            '中文系', '英文系', '外文系', '數學系', '物理系', '化學系', '生物系', '歷史系', '哲學系',
-            '法律系', '工程系', '經濟系', '會計系', '醫學系', '社會系', '心理系', '建築系', '美術系',
-            '音樂系', '新聞系', '本系', '該系', '全系', '各系', '分系',
-            // 科學／工程上嘅「系」
-            '生態系', '免疫系', '神經系', '消化系', '呼吸系', '循環系', '泌尿系', '內分泌系',
-            '坐標系', '座標系', '參考系', '慣性系', '一系列'
-        ];
+        // 比對用嘅「標準形」：將字形差異（説 / 說）抹平。
+        // 因為字形規則全部係一隻字換一隻字，標準形同原文嘅位置一一對應，
+        // 所以喺標準形度搵到嘅位置，可以直接用嚟改原文。
+        const canon = toCommonGlyphs;
 
-        function fixXi(text) {
-            if (text.indexOf('系') < 0) return text;
+        // 單字規則：from 一律改做 to，除非嗰個位置落喺 keep 入面任何一個詞度
+        function applyCharRule(text, rule) {
+            const ct = canon(text);
+            const f = canon(rule.from);
+            if (ct.indexOf(f) < 0) return text;
+            const keeps = rule.keep.map(canon).filter((w) => w.indexOf(f) >= 0);
+
             const out = [];
             for (let i = 0; i < text.length; i++) {
-                const c = text[i];
-                if (c !== '系') { out.push(c); continue; }
-                // 睇吓呢個「系」係咪落喺上面任何一個詞入面
+                if (ct[i] !== f) { out.push(text[i]); continue; }
                 let keep = false;
-                for (let k = 0; k < KEEP_XI.length; k++) {
-                    const w = KEEP_XI[k];
-                    if (text.slice(Math.max(0, i - w.length + 1), i + w.length).indexOf(w) >= 0) {
-                        keep = true;
-                        break;
+                for (let k = 0; k < keeps.length && !keep; k++) {
+                    const w = keeps[k];
+                    // keep 詞入面每一個 from 嘅位置都試一次：個詞係咪啱啱蓋住呢度
+                    for (let off = w.indexOf(f); off >= 0; off = w.indexOf(f, off + 1)) {
+                        if (i - off >= 0 && ct.substr(i - off, w.length) === w) { keep = true; break; }
                     }
                 }
-                out.push(keep ? '系' : '係');
+                out.push(keep ? text[i] : rule.to);
             }
             return out.join('');
         }
 
-        /* ---- (3) 一對多修正：鐘 / 鍾 ------------------------------
-           簡體「钟」同時對應繁體「鐘」（時鐘/時間）同「鍾」（鍾意/姓氏），
-           OpenCC 嘅預設詞庫未必涵蓋粵語口語（例如「半個鐘」），所以需要後處理。
-           策略：先將所有「鍾」當做「鐘」（因為時間用法遠比感情用法常見），
-                 再還原特定嘅「鍾」詞彙。 */
-        function fixZhong(text) {
-            return text
-                .replace(/鍾/g, '鐘')                    // 先全部當做「鐘」
-                .replace(/鐘意/g, '鍾意')                 // 還原：鍾意（喜歡）
-                .replace(/鐘情/g, '鍾情')                 // 還原：鍾情
-                .replace(/鐘愛/g, '鍾愛')                 // 還原：鍾愛
-                .replace(/一見鐘情/g, '一見鍾情')          // 還原：一見鍾情
-                .replace(/情有獨鐘/g, '情有獨鍾')          // 還原：情有獨鍾
-                .replace(/鐘靈毓秀/g, '鍾靈毓秀');         // 還原：鍾靈毓秀（成語）
+        // 詞組規則：見到 from 就換做 to。
+        // 如果嗰度本身已經係啱嘅寫法（to 包住 from），就唔好再換多次。
+        function applyPhrase(text, from, to) {
+            const ct = canon(text), cf = canon(from), cto = canon(to);
+            let idx = ct.indexOf(cf);
+            if (idx < 0) return text;
+            const k = cto.indexOf(cf);
+
+            let out = '', last = 0;
+            while (idx >= 0) {
+                if (k >= 0 && idx - k >= 0 && ct.substr(idx - k, cto.length) === cto) {
+                    idx = ct.indexOf(cf, idx + cf.length);   // 呢度本身已經係啱嘅寫法
+                    continue;
+                }
+                out += text.slice(last, idx) + to;
+                last = idx + cf.length;
+                idx = ct.indexOf(cf, last);
+            }
+            return out + text.slice(last);
         }
 
         function postCorrectS2T(text) {
-            let out = fixZhong(text);
-            if (document.getElementById('optCommonGlyph').checked) out = toCommonGlyphs(out);
-            if (document.getElementById('optCantoneseXi').checked) out = fixXi(out);
+            if (!S2T) return text;
+            const useCantonese = document.getElementById('optCantonese').checked;
+            const useGlyphs = document.getElementById('optCommonGlyph').checked;
+            let out = text;
+
+            // 1) 單字規則，由上至下逐條做
+            const chars = S2T.general.chars.concat(useCantonese ? S2T.cantonese.chars : []);
+            chars.forEach((r) => { out = applyCharRule(out, r); });
+
+            // 2) 詞組規則：長嘅先做（「一見鐘情」要喺「鐘情」之前），同樣長度就跟檔案次序
+            const phrases = S2T.general.phrases.concat(useCantonese ? S2T.cantonese.phrases : [])
+                .map((p, i) => ({ from: p[0], to: p[1], i: i }))
+                .sort((a, b) => (b.from.length - a.from.length) || (a.i - b.i));
+            phrases.forEach((p) => { out = applyPhrase(out, p.from, p.to); });
+
+            // 3) 字形
+            if (useGlyphs) out = toCommonGlyphs(out);
             return out;
         }
+
+        // 頁面上顯示載入咗幾多條規則（或者載入唔到）
+        function showRulesStatus() {
+            const el = document.getElementById('rulesStatus');
+            if (!el) return;
+            if (!S2T) {
+                el.className = 'rules-status warn';
+                el.textContent = '⚠ 載入唔到 s2t-rules.js：要同 index.html 擺喺同一個 folder；' +
+                                 '如果檔案喺度，多數係改規則嗰陣漏咗逗號或者引號（撳 F12 睇 console）。' +
+                                 '而家只用 OpenCC 轉換。';
+                document.getElementById('optCommonGlyph').disabled = true;
+                document.getElementById('optCantonese').disabled = true;
+                return;
+            }
+            const nG = Object.keys(S2T.glyphs).length;
+            const nC = S2T.general.chars.length + S2T.cantonese.chars.length;
+            const nP = S2T.general.phrases.length + S2T.cantonese.phrases.length;
+            el.className = 'rules-status' + (S2T.skipped.length ? ' warn' : '');
+            el.textContent = '已載入 s2t-rules.js：字形 ' + nG + ' 隻、單字規則 ' + nC + ' 條、詞組 ' + nP + ' 條' +
+                (S2T.skipped.length ? '（有 ' + S2T.skipped.length + ' 條格式唔啱，已略過，撳 F12 睇 console）' : '');
+        }
+        showRulesStatus();
 
         function convertS2T() {
             const textA = document.getElementById('boxA').value;
@@ -928,7 +994,6 @@
             if (!s2tConverter) {
                 // 用 hk（香港繁體）而唔係 tw：
                 //   hk 唔會做台灣地區性詞彙替換（「軟件」唔會變「軟體」、「網絡」唔會變「網路」）
-                //   出嚟嘅香港標準字形之後由 toCommonGlyphs() 換返常用寫法
                 s2tConverter = OpenCC.Converter({ from: 'cn', to: 'hk' });
             }
             // 非中文字符（英文、標點符號等）會原封不動保留
