@@ -143,6 +143,26 @@
             text-align: center;
             margin-bottom: 15px;
         }
+        .convert-options {
+            margin-top: 10px;
+            font-size: 13px;
+            color: #5d6d7e;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 20px;
+            justify-content: center;
+        }
+        .convert-options label {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .convert-options input {
+            cursor: pointer;
+            margin: 0;
+        }
         button.convert-btn {
             background-color: #27ae60;
             color: white;
@@ -384,6 +404,14 @@
     <div class="convert-btn-container">
         <button type="button" class="convert-btn s2t" onclick="convertS2T()">簡 ➔ 繁（Text Box A → B）</button>
         <button type="button" class="convert-btn t2s" onclick="convertT2S()">繁 ➔ 簡（Text Box A → B）</button>
+        <div class="convert-options">
+            <label title="OpenCC 嘅香港標準字形（説、温、户、羣）換返中文輸入法常用嘅寫法（說、溫、戶、群）">
+                <input type="checkbox" id="optCommonGlyph" checked> 用電腦常用字形（說 / 溫 / 戶 / 群）
+            </label>
+            <label title="簡體「系」轉完繁體多數仲係「系」，廣東話口語應該係「係」。「系統」「中文系」嗰類詞會保留。">
+                <input type="checkbox" id="optCantoneseXi" checked> 廣東話「系」➔「係」
+            </label>
+        </div>
     </div>
 
     <div class="container">
@@ -792,18 +820,88 @@
             return String.fromCharCode(b);
         }
 
-        /* ===== 簡繁轉換功能（使用 opencc-js）===== */
+        /* ==========================================================
+           簡繁轉換功能（使用 opencc-js）
+           ----------------------------------------------------------
+           OpenCC 嘅 cn → hk 本身已經做咗詞組級別嘅一對多消歧，
+           但出嚟嘅字仲有兩類問題要喺本機修正：
+
+           1) 香港官方字形 vs 電腦常用字形
+              「hk」用香港教育局嘅標準字形（説、閲、温、戶 寫做 户、群 寫做 羣…），
+              呢啲字喺 Unicode 係另一個碼位，同中文輸入法／大部分網站用嘅寫法唔同，
+              貼出去成日會變豆腐字或者同人哋份文件唔一致。所以轉完之後換返常用寫法。
+
+           2) 廣東話嘅「系」
+              簡體「系」轉繁體之後好多時留低做「系」（例如「即系」「我系」），
+              廣東話口語十居其九係「係」。所以除咗「系統」「學系」嗰類真係用「系」
+              嘅詞之外，其餘一律改做「係」。
+           ========================================================== */
         let s2tConverter = null; // 簡 ➔ 繁（香港繁體）
         let t2sConverter = null; // 繁 ➔ 簡
 
-        /* ---- 簡轉繁後處理：修正 OpenCC 一對多映射嘅常見錯誤 ----
-           問題根源：簡體「钟」同時對應繁體「鐘」（時鐘/時間）同「鍾」（鍾意/姓氏），
+        /* ---- (1) 香港標準字形 ➔ 電腦常用字形 ---------------------- */
+        const HK_GLYPH_MAP = {
+            // 「兌」部件：香港標準寫做「兑」
+            '兑': '兌', '説': '說', '閲': '閱', '脱': '脫', '税': '稅', '鋭': '銳', '悦': '悅', '蜕': '蛻',
+            // 「𥁕」部件：香港標準寫做「昷」
+            '温': '溫', '愠': '慍', '氲': '氳', '醖': '醞', '藴': '蘊', '緼': '縕',
+            '煴': '熅', '榅': '榲', '腽': '膃', '輼': '轀', '蒀': '蒕', '鰛': '鰮',
+            // 其餘常見嘅香港字形
+            '户': '戶', '羣': '群', '衞': '衛', '啓': '啟', '敍': '敘', '卧': '臥',
+            '峯': '峰', '牀': '床', '葱': '蔥', '麪': '麵', '鈎': '鉤',
+            '揾': '搵', '枴': '柺', '皁': '皂', '嫺': '嫻', '媪': '媼', '繮': '韁',
+            '齶': '顎', '鮎': '鯰', '捝': '挩', '棁': '梲', '敚': '敓', '涚': '涗'
+        };
+        const HK_GLYPH_RE = new RegExp('[' + Object.keys(HK_GLYPH_MAP).join('') + ']', 'g');
+
+        function toCommonGlyphs(text) {
+            return text.replace(HK_GLYPH_RE, (c) => HK_GLYPH_MAP[c] || c);
+        }
+
+        /* ---- (2) 廣東話「系」➔「係」 ------------------------------ */
+        // 呢啲詞真係用「系」，唔好改。只要個「系」落喺任何一個詞入面就保留。
+        const KEEP_XI = [
+            // 本身就係「系」嘅詞
+            '系統', '系列', '系數', '系譜', '系出', '系爭', '系所', '系友', '系辦', '系會', '系主任',
+            '體系', '學系', '語系', '派系', '星系', '太陽系', '銀河系', '水系', '山系', '河系',
+            '父系', '母系', '直系', '旁系', '嫡系', '菌系', '品系', '譜系', '世系', '家系', '族系',
+            '關係', '聯系', '維系', '系帶', '系泊',
+            // 學系（「中文系」嗰類，簡體轉完會淨低「系」）
+            '中文系', '英文系', '外文系', '數學系', '物理系', '化學系', '生物系', '歷史系', '哲學系',
+            '法律系', '工程系', '經濟系', '會計系', '醫學系', '社會系', '心理系', '建築系', '美術系',
+            '音樂系', '新聞系', '本系', '該系', '全系', '各系', '分系',
+            // 科學／工程上嘅「系」
+            '生態系', '免疫系', '神經系', '消化系', '呼吸系', '循環系', '泌尿系', '內分泌系',
+            '坐標系', '座標系', '參考系', '慣性系', '一系列'
+        ];
+
+        function fixXi(text) {
+            if (text.indexOf('系') < 0) return text;
+            const out = [];
+            for (let i = 0; i < text.length; i++) {
+                const c = text[i];
+                if (c !== '系') { out.push(c); continue; }
+                // 睇吓呢個「系」係咪落喺上面任何一個詞入面
+                let keep = false;
+                for (let k = 0; k < KEEP_XI.length; k++) {
+                    const w = KEEP_XI[k];
+                    if (text.slice(Math.max(0, i - w.length + 1), i + w.length).indexOf(w) >= 0) {
+                        keep = true;
+                        break;
+                    }
+                }
+                out.push(keep ? '系' : '係');
+            }
+            return out.join('');
+        }
+
+        /* ---- (3) 一對多修正：鐘 / 鍾 ------------------------------
+           簡體「钟」同時對應繁體「鐘」（時鐘/時間）同「鍾」（鍾意/姓氏），
            OpenCC 嘅預設詞庫未必涵蓋粵語口語（例如「半個鐘」），所以需要後處理。
-           策略：先將所有「鍾」當做「鐘」（因為時間用法遠比感情/姓氏常見），
+           策略：先將所有「鍾」當做「鐘」（因為時間用法遠比感情用法常見），
                  再還原特定嘅「鍾」詞彙。 */
-        function postCorrectS2T(text) {
+        function fixZhong(text) {
             return text
-                // === 鐘 / 鍾 一對多修正 ===
                 .replace(/鍾/g, '鐘')                    // 先全部當做「鐘」
                 .replace(/鐘意/g, '鍾意')                 // 還原：鍾意（喜歡）
                 .replace(/鐘情/g, '鍾情')                 // 還原：鍾情
@@ -811,6 +909,13 @@
                 .replace(/一見鐘情/g, '一見鍾情')          // 還原：一見鍾情
                 .replace(/情有獨鐘/g, '情有獨鍾')          // 還原：情有獨鍾
                 .replace(/鐘靈毓秀/g, '鍾靈毓秀');         // 還原：鍾靈毓秀（成語）
+        }
+
+        function postCorrectS2T(text) {
+            let out = fixZhong(text);
+            if (document.getElementById('optCommonGlyph').checked) out = toCommonGlyphs(out);
+            if (document.getElementById('optCantoneseXi').checked) out = fixXi(out);
+            return out;
         }
 
         function convertS2T() {
@@ -821,14 +926,12 @@
             }
             // 懶加載：第一次撳掣先建立 converter
             if (!s2tConverter) {
-                // 用 hk（香港繁體）而唔係 t（通用繁體）：
-                //   hk 會用香港標準字體（為、眾、裡），唔會出異體字（爲、衆）
-                //   hk 唔會做地區性詞彙替換（用户唔會變使用者，嗰個係 tw/twp 先有）
+                // 用 hk（香港繁體）而唔係 tw：
+                //   hk 唔會做台灣地區性詞彙替換（「軟件」唔會變「軟體」、「網絡」唔會變「網路」）
+                //   出嚟嘅香港標準字形之後由 toCommonGlyphs() 換返常用寫法
                 s2tConverter = OpenCC.Converter({ from: 'cn', to: 'hk' });
             }
-            // cn → hk（香港繁體）：用香港標準字符 + 詞組級別一對多消歧
             // 非中文字符（英文、標點符號等）會原封不動保留
-            // 之後再做後處理修正剩餘嘅一對多問題
             document.getElementById('boxB').value = postCorrectS2T(s2tConverter(textA));
         }
 
